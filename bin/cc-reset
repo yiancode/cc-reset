@@ -17,6 +17,7 @@ Commands:
   install       Install system deps, nvm, Node LTS, Claude Code
   doctor        Check current environment status
   login         Start manual OAuth helper flow and persist env exports
+  quickstart    Print the canonical git-only bootstrap one-liner
   repo-init     Initialize git repo and optionally configure remote
   version       Print tool version
   help          Show this help
@@ -27,6 +28,7 @@ Examples:
   ./bin/cc-reset doctor
   ./bin/cc-reset login
   ./bin/cc-reset login --print-url
+  ./bin/cc-reset quickstart
   ./bin/cc-reset repo-init --remote https://github.com/yiancode/cc-reset.git
 EOF
 }
@@ -257,6 +259,10 @@ EOF
   ccr::repo_init "$remote"
 }
 
+ccr::cmd_quickstart() {
+  "$ROOT_DIR/scripts/print-quickstart.sh" "$@"
+}
+
 main() {
   local command="${1:-help}"
   shift || true
@@ -265,6 +271,7 @@ main() {
     install) ccr::cmd_install "$@" ;;
     doctor) ccr::cmd_doctor "$@" ;;
     login) ccr::cmd_login "$@" ;;
+    quickstart) ccr::cmd_quickstart "$@" ;;
     repo-init) ccr::cmd_repo_init "$@" ;;
     version) echo "$CCR_VERSION" ;;
     help|-h|--help) ccr::usage ;;

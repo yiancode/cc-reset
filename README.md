@@ -81,6 +81,7 @@ REPO_DIR="${HOME}/.cc-reset" && \
 ./scripts/print-quickstart.sh
 ./scripts/print-quickstart.sh --email you@example.com
 ./scripts/print-quickstart.sh --force
+./bin/cc-reset quickstart
 ```
 
 ### 1) 拉取仓库
@@ -204,6 +205,18 @@ export NVM_DIR="$HOME/.nvm"
 - 已认证时会输出 PASS/WARN/INFO 风格状态卡片
 - `install` / `doctor` / 已认证跳过登录场景都会输出 PASS/WARN/INFO 卡片
 - `install --dry-run` 也会输出预览卡片
+
+### `quickstart`
+
+```bash
+./bin/cc-reset quickstart
+./bin/cc-reset quickstart --email you@example.com
+./bin/cc-reset quickstart --force
+```
+
+用途：
+- 直接打印官方推荐的一键命令
+- 不用手动从 README 复制长 one-liner
 
 ### `repo-init`
 
