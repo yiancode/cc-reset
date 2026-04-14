@@ -192,14 +192,24 @@ ccr::render_install_card() {
   local node_version="$2"
   local npm_version="$3"
   local claude_version="$4"
+  local mode="${5:-live}"
   printf '=============================================\n'
   printf ' cc-reset install\n'
   printf '=============================================\n'
-  ccr::status_line "[PASS]" "git" "${git_version:-missing}"
-  ccr::status_line "[PASS]" "Node runtime" "${node_version:-missing}"
-  ccr::status_line "[PASS]" "npm" "${npm_version:-missing}"
-  ccr::status_line "[PASS]" "Claude Code" "${claude_version:-missing}"
-  ccr::status_line "[INFO]" "Next action" "Run './bin/cc-reset login' to authenticate."
+  if [[ "$mode" == "dry-run" ]]; then
+    ccr::status_line "[INFO]" "Mode" "dry-run preview only"
+    ccr::status_line "[INFO]" "git" "${git_version:-existing-or-install-target}"
+    ccr::status_line "[INFO]" "Node runtime" "${node_version:-will install/use LTS}"
+    ccr::status_line "[INFO]" "npm" "${npm_version:-will install with Node LTS}"
+    ccr::status_line "[INFO]" "Claude Code" "${claude_version:-will install latest}"
+    ccr::status_line "[INFO]" "Next action" "Run './bin/cc-reset install' for the real install."
+  else
+    ccr::status_line "[PASS]" "git" "${git_version:-missing}"
+    ccr::status_line "[PASS]" "Node runtime" "${node_version:-missing}"
+    ccr::status_line "[PASS]" "npm" "${npm_version:-missing}"
+    ccr::status_line "[PASS]" "Claude Code" "${claude_version:-missing}"
+    ccr::status_line "[INFO]" "Next action" "Run './bin/cc-reset login' to authenticate."
+  fi
   printf '=============================================\n'
 }
 

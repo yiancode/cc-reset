@@ -56,11 +56,6 @@ EOF
   ccr::install_node_lts "$dry_run"
   ccr::install_claude_code "$dry_run"
 
-  if [[ "$dry_run" -eq 1 ]]; then
-    ccr::info "Dry-run complete."
-    return 0
-  fi
-
   local git_version=""
   local node_version=""
   local npm_version=""
@@ -69,6 +64,12 @@ EOF
   ccr::has_cmd node && node_version="$(node -v)"
   ccr::has_cmd npm && npm_version="$(npm -v)"
   ccr::has_cmd claude && claude_version="$(claude --version)"
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    ccr::render_install_card "$git_version" "$node_version" "$npm_version" "$claude_version" "dry-run"
+    return 0
+  fi
+
   ccr::render_install_card "$git_version" "$node_version" "$npm_version" "$claude_version"
 }
 
