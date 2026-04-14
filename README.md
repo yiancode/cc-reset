@@ -81,6 +81,7 @@ https://platform.claude.com/oauth/code/callback?code=...&state=...
 5. 工具会：
    - 交换 OAuth token
    - 写入 `~/.config/cc-reset/env.sh`
+   - 同步更新 Claude 全局配置中的 onboarding 状态，避免再次进入首次登录选择界面
 
 如果是 **Claude 订阅登录**（当前默认路径），会写入：
 

@@ -184,6 +184,7 @@ ccr::post_login_message() {
   local env_file
   env_file="$(ccr::env_file)"
   ccr::info "Login material written to: $env_file"
+  ccr::info "Claude onboarding config has also been updated to avoid the first-run login picker."
   ccr::info "Run the following in your shell:"
   printf 'source %q\n' "$env_file"
 
