@@ -79,8 +79,15 @@ https://platform.claude.com/oauth/code/callback?code=...&state=...
 4. 把 **完整回调 URL** 粘贴回 VPS 终端
 5. 工具会：
    - 交换 OAuth token
-   - 调用 Anthropic OAuth API 生成可用 API key
    - 写入 `~/.config/cc-reset/env.sh`
+
+如果是 **Claude 订阅登录**（当前默认路径），会写入：
+
+- `CLAUDE_CODE_OAUTH_TOKEN`
+- `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`
+- `CLAUDE_CODE_OAUTH_SCOPES`
+
+只有在非订阅 / 非 inference scope 的路径下，才会尝试生成 `ANTHROPIC_API_KEY`。
 
 ### 4) 激活环境变量
 
@@ -175,10 +182,12 @@ v1 优先保证：
 ~/.config/cc-reset/env.sh
 ```
 
-其中包含：
+其中通常包含：
 
 ```bash
-export ANTHROPIC_API_KEY='...'
+export CLAUDE_CODE_OAUTH_TOKEN='...'
+export CLAUDE_CODE_OAUTH_REFRESH_TOKEN='...'
+export CLAUDE_CODE_OAUTH_SCOPES='user:profile user:inference ...'
 ```
 
 Claude Code 在当前 shell 中读取该环境变量后即可使用。
