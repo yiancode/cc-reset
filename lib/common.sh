@@ -8,6 +8,7 @@ CCR_STATE_DIR="${CCR_CONFIG_DIR}/state"
 CCR_ENV_FILE="${CCR_CONFIG_DIR}/env.sh"
 CCR_SESSION_FILE="${CCR_STATE_DIR}/oauth-session.json"
 CCR_NVM_BLOCK_ID="cc-reset-nvm"
+CCR_CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 
 ccr::info() { printf '[INFO] %s\n' "$*"; }
 ccr::warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -16,6 +17,15 @@ ccr::die() { ccr::error "$*"; exit 1; }
 
 ccr::env_file() {
   printf '%s\n' "$CCR_ENV_FILE"
+}
+
+ccr::claude_config_file() {
+  local nested="${CCR_CLAUDE_HOME}/.config.json"
+  if [[ -f "$nested" ]]; then
+    printf '%s\n' "$nested"
+  else
+    printf '%s\n' "${CCR_CLAUDE_HOME}.json"
+  fi
 }
 
 ccr::ensure_state_dirs() {
@@ -173,6 +183,7 @@ ccr::doctor() {
   local wget_status="missing"
   local gcc_status="missing"
   local make_status="missing"
+  local auth_state="missing"
 
   if [[ -r /etc/os-release ]]; then
     os_name="$(. /etc/os-release && printf '%s' "${PRETTY_NAME:-${NAME:-unknown}}")"
@@ -189,10 +200,11 @@ ccr::doctor() {
   ccr::has_cmd node && node_version="$(node -v)"
   ccr::has_cmd npm && npm_version="$(npm -v)"
   ccr::has_cmd claude && claude_version="$(claude --version)"
+  ccr::is_authenticated && auth_state="authenticated"
 
   if [[ "$json" -eq 1 ]]; then
     cat <<EOF
-{"os":"${os_name}","packageManager":"${pkg_manager}","git":"${git_status}","curl":"${curl_status}","wget":"${wget_status}","gcc":"${gcc_status}","make":"${make_status}","nvm":"${nvm_status}","node":"${node_version}","npm":"${npm_version}","claude":"${claude_version}"}
+{"os":"${os_name}","packageManager":"${pkg_manager}","git":"${git_status}","curl":"${curl_status}","wget":"${wget_status}","gcc":"${gcc_status}","make":"${make_status}","nvm":"${nvm_status}","node":"${node_version}","npm":"${npm_version}","claude":"${claude_version}","auth":"${auth_state}"}
 EOF
     return 0
   fi
@@ -211,13 +223,65 @@ nvm             : ${nvm_status}
 node            : ${node_version:-missing}
 npm             : ${npm_version:-missing}
 claude          : ${claude_version:-missing}
+auth            : ${auth_state}
 session file    : ${CCR_SESSION_FILE}
 env file        : ${CCR_ENV_FILE}
 EOF
+  ccr::print_auth_summary
 }
 
 ccr::require_node() {
   ccr::has_cmd node || ccr::die "node is required. Run ./bin/cc-reset install first."
+}
+
+ccr::auth_env_present() {
+  [[ -f "$CCR_ENV_FILE" ]] || return 1
+  grep -qE 'CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY' "$CCR_ENV_FILE"
+}
+
+ccr::claude_onboarding_complete() {
+  local config_file
+  config_file="$(ccr::claude_config_file)"
+  [[ -f "$config_file" ]] || return 1
+  grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$config_file"
+}
+
+ccr::auth_status_text() {
+  ccr::has_cmd claude || return 1
+  claude auth status --text 2>/dev/null || true
+}
+
+ccr::is_authenticated() {
+  local status_text=""
+  status_text="$(ccr::auth_status_text)"
+  if [[ "$status_text" == *"Auth token:"* ]] || [[ "$status_text" == *"API key:"* ]]; then
+    return 0
+  fi
+
+  if ccr::auth_env_present && ccr::claude_onboarding_complete; then
+    return 0
+  fi
+
+  return 1
+}
+
+ccr::print_auth_summary() {
+  local env_state="missing"
+  local onboarding_state="missing"
+  local status_text=""
+
+  ccr::auth_env_present && env_state="present"
+  ccr::claude_onboarding_complete && onboarding_state="complete"
+  status_text="$(ccr::auth_status_text)"
+
+  printf 'auth env        : %s\n' "$env_state"
+  printf 'onboarding      : %s\n' "$onboarding_state"
+  if [[ -n "$status_text" ]]; then
+    printf 'claude auth     : %s\n' "$status_text" | tr '\n' ' ' | sed 's/  */ /g'
+    printf '\n'
+  else
+    printf 'claude auth     : unavailable\n'
+  fi
 }
 
 ccr::copy_to_clipboard() {

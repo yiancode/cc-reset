@@ -42,4 +42,9 @@ done
 cd "$ROOT_DIR"
 
 ./bin/cc-reset install "${INSTALL_ARGS[@]}"
-./bin/cc-reset login "${LOGIN_ARGS[@]}"
+if ./bin/cc-reset doctor --json 2>/dev/null | grep -q '"auth":"authenticated"'; then
+  echo "[INFO] Existing Claude authentication detected; skipping login."
+  ./bin/cc-reset doctor
+else
+  ./bin/cc-reset login "${LOGIN_ARGS[@]}"
+fi

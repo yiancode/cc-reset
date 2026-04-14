@@ -91,6 +91,7 @@ ccr::cmd_login() {
   local callback_url=""
   local code_state=""
   local email=""
+  local force=0
   local -a start_cmd
 
   while (($#)); do
@@ -113,9 +114,12 @@ ccr::cmd_login() {
         email="${1:-}"
         [[ -n "$email" ]] || ccr::die "--email requires a value"
         ;;
+      --force)
+        force=1
+        ;;
       -h|--help)
         cat <<'EOF'
-Usage: cc-reset login [--print-url] [--callback-url <url>] [--code-state <code#state>] [--email <email>]
+Usage: cc-reset login [--print-url] [--callback-url <url>] [--code-state <code#state>] [--email <email>] [--force]
 
 Start the manual Claude subscription OAuth flow. By default:
   1. Generates the login URL
@@ -133,6 +137,14 @@ EOF
   done
 
   ccr::require_node
+
+  if [[ "$force" -ne 1 ]] && ccr::is_authenticated; then
+    ccr::info "Existing Claude authentication detected; skipping login."
+    ccr::print_auth_summary
+    ccr::info "Use './bin/cc-reset login --force' to re-authenticate."
+    return 0
+  fi
+
   local start_json auth_url
   start_cmd=(node "$ROOT_DIR/lib/oauth-helper.mjs" start --json)
   if [[ -n "$email" ]]; then

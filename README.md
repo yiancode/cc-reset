@@ -22,6 +22,7 @@
   - 支持粘贴最终回调 URL
   - 自动完成 token exchange
   - 生成 `ANTHROPIC_API_KEY` 环境文件
+  - 已认证时自动跳过重复登录
 - 提供 git 仓库初始化 / remote 配置辅助
 - 提供一键发布脚本
 
@@ -49,7 +50,8 @@ REPO_DIR="${HOME}/.cc-reset" && \
 - 拉取或更新最新代码
 - 安装系统依赖
 - 安装 nvm / Node LTS / Claude Code
-- 直接进入 `login`
+- 如果尚未认证则进入 `login`
+- 如果已认证则自动跳过重复登录
 
 你只需要：
 1. 复制终端给出的链接到外部浏览器
@@ -168,6 +170,7 @@ export NVM_DIR="$HOME/.nvm"
 ./bin/cc-reset login --callback-url 'https://platform.claude.com/oauth/code/callback?code=...&state=...'
 ./bin/cc-reset login --code-state '<code>#<state>'
 ./bin/cc-reset login --email you@example.com
+./bin/cc-reset login --force
 ```
 
 说明：
@@ -175,6 +178,7 @@ export NVM_DIR="$HOME/.nvm"
 - `--callback-url`：直接喂给回调 URL
 - `--code-state`：如果你拿到的是 `code#state` 形式，也可以直接完成
 - `--email`：预填登录邮箱
+- 默认会先检查是否已认证；如需强制重新认证，使用 `--force`
 
 ### `repo-init`
 
