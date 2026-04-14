@@ -23,6 +23,7 @@
   - 自动完成 token exchange
   - 生成 `ANTHROPIC_API_KEY` 环境文件
 - 提供 git 仓库初始化 / remote 配置辅助
+- 提供一键发布脚本
 
 ## 项目结构
 
@@ -220,7 +221,9 @@ Claude Code 在当前 shell 中读取该环境变量后即可使用。
 
 ```bash
 source ~/.config/cc-reset/env.sh
-echo "$ANTHROPIC_API_KEY"
+echo "$CLAUDE_CODE_OAUTH_TOKEN"
+echo "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN"
+echo "$CLAUDE_CODE_OAUTH_SCOPES"
 ```
 
 再执行：
@@ -245,7 +248,25 @@ https://platform.claude.com/oauth/code/callback?code=...&state=...
 
 ## 开源发布建议
 
-如果你要发布到 GitHub：
+如果你要发布到 GitHub，直接执行：
+
+```bash
+./scripts/publish.sh
+```
+
+或显式指定 remote：
+
+```bash
+./scripts/publish.sh --remote https://github.com/yiancode/cc-reset.git
+```
+
+脚本会：
+- 初始化 git（如果还没初始化）
+- 设置/更新 `origin`
+- 跑轻量检查
+- 推送当前分支
+
+如果你想手动发布，也可以：
 
 ```bash
 ./bin/cc-reset repo-init --remote https://github.com/yiancode/cc-reset.git
