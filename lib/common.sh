@@ -86,14 +86,11 @@ ccr::ensure_shell_init() {
   fi
 }
 
-ccr::load_nvm() {
+ccr::run_nvm_shell() {
+  local script="$1"
   export NVM_DIR="${HOME}/.nvm"
-  if [[ -s "${NVM_DIR}/nvm.sh" ]]; then
-    # shellcheck disable=SC1090
-    . "${NVM_DIR}/nvm.sh"
-  else
-    return 1
-  fi
+  [[ -s "${NVM_DIR}/nvm.sh" ]] || return 1
+  bash -lc "set +u; export NVM_DIR=\"\$HOME/.nvm\"; . \"\$NVM_DIR/nvm.sh\"; ${script}"
 }
 
 ccr::install_system_packages() {
@@ -129,10 +126,8 @@ ccr::install_node_lts() {
     ccr::run 1 bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; nvm install --lts; nvm alias default lts/*; nvm use --lts'
     return 0
   fi
-  ccr::load_nvm || ccr::die "nvm is not available after installation."
-  nvm install --lts >/dev/null
-  nvm alias default 'lts/*' >/dev/null
-  nvm use --lts >/dev/null
+  ccr::run_nvm_shell 'nvm install --lts >/dev/null; nvm alias default "lts/*" >/dev/null; nvm use --lts >/dev/null' \
+    || ccr::die "nvm is not available after installation."
 }
 
 ccr::latest_claude_version() {
@@ -146,12 +141,11 @@ ccr::install_claude_code() {
     return 0
   fi
 
-  ccr::load_nvm || ccr::die "nvm must be loaded before installing Claude Code."
-  nvm use --lts >/dev/null
   local latest
   latest="$(ccr::latest_claude_version)"
   ccr::info "Installing Claude Code @ ${latest}"
-  npm install -g "@anthropic-ai/claude-code@${latest}"
+  ccr::run_nvm_shell "nvm use --lts >/dev/null; npm install -g @anthropic-ai/claude-code@${latest}" \
+    || ccr::die "nvm must be loaded before installing Claude Code."
 }
 
 ccr::print_versions() {
@@ -159,9 +153,7 @@ ccr::print_versions() {
     ccr::has_cmd git && printf 'git: %s\n' "$(git --version | awk '{print $3}')" || printf 'git: missing\n'
     ccr::has_cmd curl && printf 'curl: present\n' || printf 'curl: missing\n'
     ccr::has_cmd wget && printf 'wget: present\n' || printf 'wget: missing\n'
-    if ccr::load_nvm >/dev/null 2>&1; then
-      nvm use --lts >/dev/null 2>&1 || true
-    fi
+    ccr::run_nvm_shell 'nvm use --lts >/dev/null 2>&1 || true' >/dev/null 2>&1 || true
     ccr::has_cmd node && printf 'node: %s\n' "$(node -v)" || printf 'node: missing\n'
     ccr::has_cmd npm && printf 'npm: %s\n' "$(npm -v)" || printf 'npm: missing\n'
     ccr::has_cmd claude && printf 'claude: %s\n' "$(claude --version)" || printf 'claude: missing\n'
