@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT_DIR/lib/common.sh"
+
+ccr::usage() {
+  cat <<'EOF'
+cc-reset - Claude Code VPS bootstrap helper
+
+Usage:
+  cc-reset <command> [options]
+
+Commands:
+  install       Install system deps, nvm, Node LTS, Claude Code
+  doctor        Check current environment status
+  login         Start manual OAuth helper flow and persist env exports
+  repo-init     Initialize git repo and optionally configure remote
+  version       Print tool version
+  help          Show this help
+
+Examples:
+  ./bin/cc-reset install
+  ./bin/cc-reset install --dry-run
+  ./bin/cc-reset doctor
+  ./bin/cc-reset login
+  ./bin/cc-reset login --print-url
+  ./bin/cc-reset repo-init --remote https://github.com/yiancode/cc-reset.git
+EOF
+}
+
+ccr::cmd_install() {
+  local dry_run=0
+  while (($#)); do
+    case "$1" in
+      --dry-run) dry_run=1 ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: cc-reset install [--dry-run]
+
+Install required yum packages, nvm, Node LTS, npm, and the latest Claude Code.
+EOF
+        return 0
+        ;;
+      *) ccr::die "Unknown install flag: $1" ;;
+    esac
+    shift
+  done
+
+  ccr::require_linux_or_dry_run "$dry_run"
+  ccr::ensure_state_dirs
+  ccr::install_system_packages "$dry_run"
+  ccr::install_nvm "$dry_run"
+  ccr::install_node_lts "$dry_run"
+  ccr::install_claude_code "$dry_run"
+
+  if [[ "$dry_run" -eq 1 ]]; then
+    ccr::info "Dry-run complete."
+    return 0
+  fi
+
+  ccr::info "Install complete. Current versions:"
+  ccr::print_versions
+}
+
+ccr::cmd_doctor() {
+  local json=0
+  while (($#)); do
+    case "$1" in
+      --json) json=1 ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: cc-reset doctor [--json]
+
+Inspect OS, package manager, nvm, Node, npm, and Claude Code availability.
+EOF
+        return 0
+        ;;
+      *) ccr::die "Unknown doctor flag: $1" ;;
+    esac
+    shift
+  done
+
+  ccr::doctor "$json"
+}
+
+ccr::cmd_login() {
+  local mode="interactive"
+  local callback_url=""
+  local code_state=""
+  local email=""
+  local -a start_cmd
+
+  while (($#)); do
+    case "$1" in
+      --print-url) mode="print-url" ;;
+      --callback-url)
+        shift
+        callback_url="${1:-}"
+        [[ -n "$callback_url" ]] || ccr::die "--callback-url requires a value"
+        mode="callback"
+        ;;
+      --code-state)
+        shift
+        code_state="${1:-}"
+        [[ -n "$code_state" ]] || ccr::die "--code-state requires a value"
+        mode="code-state"
+        ;;
+      --email)
+        shift
+        email="${1:-}"
+        [[ -n "$email" ]] || ccr::die "--email requires a value"
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: cc-reset login [--print-url] [--callback-url <url>] [--code-state <code#state>] [--email <email>]
+
+Start the manual Claude subscription OAuth flow. By default:
+  1. Generates the login URL
+  2. Prints and tries to copy it
+  3. Waits for you to paste the final callback URL (or code#state)
+  4. Exchanges the code for an API key and writes ~/.config/cc-reset/env.sh
+EOF
+        return 0
+        ;;
+      *)
+        ccr::die "Unknown login flag: $1"
+        ;;
+    esac
+    shift
+  done
+
+  ccr::require_node
+  local start_json auth_url
+  start_cmd=(node "$ROOT_DIR/lib/oauth-helper.mjs" start --json)
+  if [[ -n "$email" ]]; then
+    start_cmd+=(--email "$email")
+  fi
+  start_json="$("${start_cmd[@]}")"
+  auth_url="$(printf '%s' "$start_json" | node -e 'process.stdin.on("data",d=>{const x=JSON.parse(String(d)); process.stdout.write(x.authUrl);})')"
+  ccr::info "Open this URL in your local browser to sign in:"
+  printf '%s\n' "$auth_url"
+  ccr::copy_to_clipboard "$auth_url" || true
+
+  case "$mode" in
+    print-url)
+      return 0
+      ;;
+    callback)
+      ccr::complete_login_from_callback "$callback_url"
+      ;;
+    code-state)
+      ccr::complete_login_from_code_state "$code_state"
+      ;;
+    interactive)
+      printf '\nPaste the final callback URL (or code#state), then press Enter:\n> '
+      local user_input=""
+      IFS= read -r user_input
+      [[ -n "$user_input" ]] || ccr::die "No callback input provided."
+      if [[ "$user_input" == http* ]]; then
+        ccr::complete_login_from_callback "$user_input"
+      else
+        ccr::complete_login_from_code_state "$user_input"
+      fi
+      ;;
+  esac
+}
+
+ccr::complete_login_from_callback() {
+  local callback_url="$1"
+  node "$ROOT_DIR/lib/oauth-helper.mjs" complete --callback-url "$callback_url"
+  ccr::post_login_message
+}
+
+ccr::complete_login_from_code_state() {
+  local code_state="$1"
+  node "$ROOT_DIR/lib/oauth-helper.mjs" complete --code-state "$code_state"
+  ccr::post_login_message
+}
+
+ccr::post_login_message() {
+  local env_file
+  env_file="$(ccr::env_file)"
+  ccr::info "Login material written to: $env_file"
+  ccr::info "Run the following in your shell:"
+  printf 'source %q\n' "$env_file"
+
+  if [[ -f "$env_file" ]] && command -v claude >/dev/null 2>&1; then
+    # shellcheck disable=SC1090
+    source "$env_file"
+    ccr::info "Current Claude auth status:"
+    claude auth status --text || true
+  fi
+}
+
+ccr::cmd_repo_init() {
+  local remote=""
+  while (($#)); do
+    case "$1" in
+      --remote)
+        shift
+        remote="${1:-}"
+        [[ -n "$remote" ]] || ccr::die "--remote requires a value"
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: cc-reset repo-init [--remote <url>]
+
+Initialize a git repository if needed and configure origin if provided.
+EOF
+        return 0
+        ;;
+      *) ccr::die "Unknown repo-init flag: $1" ;;
+    esac
+    shift
+  done
+
+  ccr::repo_init "$remote"
+}
+
+main() {
+  local command="${1:-help}"
+  shift || true
+
+  case "$command" in
+    install) ccr::cmd_install "$@" ;;
+    doctor) ccr::cmd_doctor "$@" ;;
+    login) ccr::cmd_login "$@" ;;
+    repo-init) ccr::cmd_repo_init "$@" ;;
+    version) echo "$CCR_VERSION" ;;
+    help|-h|--help) ccr::usage ;;
+    *) ccr::die "Unknown command: $command" ;;
+  esac
+}
+
+main "$@"
