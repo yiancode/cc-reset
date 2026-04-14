@@ -75,6 +75,14 @@ REPO_DIR="${HOME}/.cc-reset" && \
 "$REPO_DIR/scripts/bootstrap-login.sh" -- --force
 ```
 
+如果你想让仓库直接帮你生成这条 one-liner：
+
+```bash
+./scripts/print-quickstart.sh
+./scripts/print-quickstart.sh --email you@example.com
+./scripts/print-quickstart.sh --force
+```
+
 ### 1) 拉取仓库
 
 ```bash
@@ -214,6 +222,7 @@ export NVM_DIR="$HOME/.nvm"
 ./scripts/bootstrap-login.sh
 ./scripts/bootstrap-login.sh -- --email you@example.com
 ./scripts/bootstrap-login.sh -- --force
+./scripts/print-quickstart.sh
 ```
 
 用途：
