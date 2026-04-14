@@ -35,6 +35,35 @@ lib/oauth-helper.mjs  # OAuth / PKCE helper
 
 ## 快速开始
 
+### 0) 只有 git 时的一条命令
+
+如果机器上几乎只有 `git`，直接执行下面这一条：
+
+```bash
+REPO_DIR="${HOME}/.cc-reset" && \
+([ -d "$REPO_DIR/.git" ] && git -C "$REPO_DIR" fetch --depth=1 origin main && git -C "$REPO_DIR" reset --hard origin/main || git clone --depth=1 https://github.com/yiancode/cc-reset.git "$REPO_DIR") && \
+"$REPO_DIR/scripts/bootstrap-login.sh"
+```
+
+这条命令会：
+- 拉取或更新最新代码
+- 安装系统依赖
+- 安装 nvm / Node LTS / Claude Code
+- 直接进入 `login`
+
+你只需要：
+1. 复制终端给出的链接到外部浏览器
+2. 登录后拿到回调 URL
+3. 粘贴回 VPS
+
+如果你想在一条命令里预填邮箱：
+
+```bash
+REPO_DIR="${HOME}/.cc-reset" && \
+([ -d "$REPO_DIR/.git" ] && git -C "$REPO_DIR" fetch --depth=1 origin main && git -C "$REPO_DIR" reset --hard origin/main || git clone --depth=1 https://github.com/yiancode/cc-reset.git "$REPO_DIR") && \
+"$REPO_DIR/scripts/bootstrap-login.sh" -- --email you@example.com
+```
+
 ### 1) 拉取仓库
 
 ```bash
@@ -157,6 +186,19 @@ export NVM_DIR="$HOME/.nvm"
 功能：
 - 当前目录未初始化 git 时执行 `git init`
 - 配置 `origin`
+
+### `bootstrap-login.sh`
+
+```bash
+./scripts/bootstrap-login.sh
+./scripts/bootstrap-login.sh -- --email you@example.com
+```
+
+用途：
+- 先跑 `install`
+- 紧接着跑 `login`
+
+适合你已经把仓库 clone 下来之后直接一把跑通。
 
 ## 设计说明
 
