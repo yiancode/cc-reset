@@ -61,8 +61,15 @@ EOF
     return 0
   fi
 
-  ccr::info "Install complete. Current versions:"
-  ccr::print_versions
+  local git_version=""
+  local node_version=""
+  local npm_version=""
+  local claude_version=""
+  ccr::has_cmd git && git_version="$(git --version | awk '{print $3}')"
+  ccr::has_cmd node && node_version="$(node -v)"
+  ccr::has_cmd npm && npm_version="$(npm -v)"
+  ccr::has_cmd claude && claude_version="$(claude --version)"
+  ccr::render_install_card "$git_version" "$node_version" "$npm_version" "$claude_version"
 }
 
 ccr::cmd_doctor() {

@@ -20,7 +20,16 @@ ccr::status_line() {
   local state="$1"
   local label="$2"
   local detail="${3:-}"
-  printf '%-10s %-24s %s\n' "$state" "$label" "$detail"
+  local state_rendered="$state"
+  if [[ -t 1 ]]; then
+    case "$state" in
+      "[PASS]") state_rendered=$'\033[32m[PASS]\033[0m' ;;
+      "[WARN]") state_rendered=$'\033[33m[WARN]\033[0m' ;;
+      "[INFO]") state_rendered=$'\033[36m[INFO]\033[0m' ;;
+      "[ERROR]") state_rendered=$'\033[31m[ERROR]\033[0m' ;;
+    esac
+  fi
+  printf '%b %-24s %s\n' "$(printf '%-10s' "$state_rendered")" "$label" "$detail"
 }
 
 ccr::env_file() {
@@ -176,6 +185,22 @@ ccr::print_versions() {
     ccr::has_cmd npm && printf 'npm: %s\n' "$(npm -v)" || printf 'npm: missing\n'
     ccr::has_cmd claude && printf 'claude: %s\n' "$(claude --version)" || printf 'claude: missing\n'
   } | sed 's/^/[OK] /'
+}
+
+ccr::render_install_card() {
+  local git_version="$1"
+  local node_version="$2"
+  local npm_version="$3"
+  local claude_version="$4"
+  printf '=============================================\n'
+  printf ' cc-reset install\n'
+  printf '=============================================\n'
+  ccr::status_line "[PASS]" "git" "${git_version:-missing}"
+  ccr::status_line "[PASS]" "Node runtime" "${node_version:-missing}"
+  ccr::status_line "[PASS]" "npm" "${npm_version:-missing}"
+  ccr::status_line "[PASS]" "Claude Code" "${claude_version:-missing}"
+  ccr::status_line "[INFO]" "Next action" "Run './bin/cc-reset login' to authenticate."
+  printf '=============================================\n'
 }
 
 ccr::doctor() {

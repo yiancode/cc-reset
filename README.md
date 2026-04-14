@@ -180,6 +180,7 @@ export NVM_DIR="$HOME/.nvm"
 - `--email`：预填登录邮箱
 - 默认会先检查是否已认证；如需强制重新认证，使用 `--force`
 - 已认证时会输出 PASS/WARN/INFO 风格状态卡片
+- `install` / `doctor` / 已认证跳过登录场景都会输出 PASS/WARN/INFO 卡片
 
 ### `repo-init`
 
