@@ -179,6 +179,7 @@ export NVM_DIR="$HOME/.nvm"
 - `--code-state`：如果你拿到的是 `code#state` 形式，也可以直接完成
 - `--email`：预填登录邮箱
 - 默认会先检查是否已认证；如需强制重新认证，使用 `--force`
+- 已认证时会输出 PASS/WARN/INFO 风格状态卡片
 
 ### `repo-init`
 

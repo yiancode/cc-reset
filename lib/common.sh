@@ -14,6 +14,14 @@ ccr::info() { printf '[INFO] %s\n' "$*"; }
 ccr::warn() { printf '[WARN] %s\n' "$*" >&2; }
 ccr::error() { printf '[ERROR] %s\n' "$*" >&2; }
 ccr::die() { ccr::error "$*"; exit 1; }
+ccr::ok() { printf '[PASS] %s\n' "$*"; }
+
+ccr::status_line() {
+  local state="$1"
+  local label="$2"
+  local detail="${3:-}"
+  printf '%-10s %-24s %s\n' "$state" "$label" "$detail"
+}
 
 ccr::env_file() {
   printf '%s\n' "$CCR_ENV_FILE"
@@ -208,26 +216,19 @@ ccr::doctor() {
 EOF
     return 0
   fi
-
-  cat <<EOF
-Claude Code VPS Bootstrap Doctor
-================================
-OS              : ${os_name}
-Package manager : ${pkg_manager}
-git             : ${git_status}
-curl            : ${curl_status}
-wget            : ${wget_status}
-gcc             : ${gcc_status}
-make            : ${make_status}
-nvm             : ${nvm_status}
-node            : ${node_version:-missing}
-npm             : ${npm_version:-missing}
-claude          : ${claude_version:-missing}
-auth            : ${auth_state}
-session file    : ${CCR_SESSION_FILE}
-env file        : ${CCR_ENV_FILE}
-EOF
-  ccr::print_auth_summary
+  ccr::render_doctor_card \
+    "$os_name" \
+    "$pkg_manager" \
+    "$git_status" \
+    "$curl_status" \
+    "$wget_status" \
+    "$gcc_status" \
+    "$make_status" \
+    "$nvm_status" \
+    "${node_version:-}" \
+    "${npm_version:-}" \
+    "${claude_version:-}" \
+    "$auth_state"
 }
 
 ccr::require_node() {
@@ -274,13 +275,65 @@ ccr::print_auth_summary() {
   ccr::claude_onboarding_complete && onboarding_state="complete"
   status_text="$(ccr::auth_status_text)"
 
-  printf 'auth env        : %s\n' "$env_state"
-  printf 'onboarding      : %s\n' "$onboarding_state"
+  ccr::status_line "$([[ "$env_state" == "present" ]] && echo "[PASS]" || echo "[WARN]")" "Auth env file" "$CCR_ENV_FILE"
+  ccr::status_line "$([[ "$onboarding_state" == "complete" ]] && echo "[PASS]" || echo "[WARN]")" "Onboarding state" "$(ccr::claude_config_file)"
   if [[ -n "$status_text" ]]; then
-    printf 'claude auth     : %s\n' "$status_text" | tr '\n' ' ' | sed 's/  */ /g'
-    printf '\n'
+    ccr::status_line "[PASS]" "Claude auth source" "$(printf '%s' "$status_text" | tr '\n' ' ' | sed 's/  */ /g')"
   else
-    printf 'claude auth     : unavailable\n'
+    ccr::status_line "[WARN]" "Claude auth source" "unavailable"
+  fi
+}
+
+ccr::render_doctor_card() {
+  local os_name="$1"
+  local pkg_manager="$2"
+  local git_status="$3"
+  local curl_status="$4"
+  local wget_status="$5"
+  local gcc_status="$6"
+  local make_status="$7"
+  local nvm_status="$8"
+  local node_version="$9"
+  local npm_version="${10}"
+  local claude_version="${11}"
+  local auth_state="${12}"
+  local env_state="WARN"
+  local onboarding_state="WARN"
+  local auth_line_state="WARN"
+  local status_text=""
+
+  ccr::auth_env_present && env_state="PASS"
+  ccr::claude_onboarding_complete && onboarding_state="PASS"
+  status_text="$(ccr::auth_status_text)"
+  [[ "$auth_state" == "authenticated" ]] && auth_line_state="PASS"
+
+  printf '=============================================\n'
+  printf ' cc-reset doctor\n'
+  printf '=============================================\n'
+  ccr::status_line "[INFO]" "System" "$os_name"
+  ccr::status_line "[INFO]" "Package manager" "$pkg_manager"
+  ccr::status_line "[PASS]" "git" "$git_status"
+  ccr::status_line "[PASS]" "curl" "$curl_status"
+  ccr::status_line "[PASS]" "wget" "$wget_status"
+  ccr::status_line "[PASS]" "gcc" "$gcc_status"
+  ccr::status_line "[PASS]" "make" "$make_status"
+  ccr::status_line "$([[ "$nvm_status" == "present" ]] && echo "[PASS]" || echo "[WARN]")" "nvm" "$nvm_status"
+  ccr::status_line "$([[ -n "$node_version" ]] && echo "[PASS]" || echo "[WARN]")" "Node runtime" "${node_version:-missing}"
+  ccr::status_line "$([[ -n "$npm_version" ]] && echo "[PASS]" || echo "[WARN]")" "npm" "${npm_version:-missing}"
+  ccr::status_line "$([[ -n "$claude_version" ]] && echo "[PASS]" || echo "[WARN]")" "Claude Code" "${claude_version:-missing}"
+  ccr::status_line "$([[ "$auth_state" == "authenticated" ]] && echo "[PASS]" || echo "[WARN]")" "Authentication" "$auth_state"
+  ccr::status_line "[$env_state]" "Auth env file" "$CCR_ENV_FILE"
+  ccr::status_line "[$onboarding_state]" "Onboarding state" "$(ccr::claude_config_file)"
+  if [[ -n "$status_text" ]]; then
+    ccr::status_line "[$auth_line_state]" "Claude auth source" "$(printf '%s' "$status_text" | tr '\n' ' ' | sed 's/  */ /g')"
+  else
+    ccr::status_line "[WARN]" "Claude auth source" "unavailable"
+  fi
+  printf '=============================================\n'
+  if [[ "$auth_state" == "authenticated" ]]; then
+    ccr::status_line "[INFO]" "Next action" "No login needed. Use './bin/cc-reset login --force' to re-authenticate."
+  else
+    ccr::status_line "[INFO]" "Next action" "Run './bin/cc-reset login' to authenticate."
   fi
 }
 

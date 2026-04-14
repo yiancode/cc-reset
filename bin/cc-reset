@@ -139,9 +139,13 @@ EOF
   ccr::require_node
 
   if [[ "$force" -ne 1 ]] && ccr::is_authenticated; then
-    ccr::info "Existing Claude authentication detected; skipping login."
+    printf '=============================================\n'
+    printf ' cc-reset login\n'
+    printf '=============================================\n'
+    ccr::status_line "[PASS]" "Authentication" "Existing Claude authentication detected"
     ccr::print_auth_summary
-    ccr::info "Use './bin/cc-reset login --force' to re-authenticate."
+    ccr::status_line "[INFO]" "Next action" "Use './bin/cc-reset login --force' to re-authenticate."
+    printf '=============================================\n'
     return 0
   fi
 
