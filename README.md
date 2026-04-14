@@ -49,6 +49,7 @@ REPO_DIR="${HOME}/.cc-reset" && \
 这条命令会：
 - 拉取或更新最新代码
 - 安装系统依赖
+- 尝试安装 `xclip` 以支持 Linux 终端复制链接
 - 安装 nvm / Node LTS / Claude Code
 - 如果尚未认证则进入 `login`
 - 如果已认证则自动跳过重复登录
@@ -64,6 +65,14 @@ REPO_DIR="${HOME}/.cc-reset" && \
 REPO_DIR="${HOME}/.cc-reset" && \
 ([ -d "$REPO_DIR/.git" ] && git -C "$REPO_DIR" fetch --depth=1 origin main && git -C "$REPO_DIR" reset --hard origin/main || git clone --depth=1 https://github.com/yiancode/cc-reset.git "$REPO_DIR") && \
 "$REPO_DIR/scripts/bootstrap-login.sh" -- --email you@example.com
+```
+
+如果你要强制重新登录：
+
+```bash
+REPO_DIR="${HOME}/.cc-reset" && \
+([ -d "$REPO_DIR/.git" ] && git -C "$REPO_DIR" fetch --depth=1 origin main && git -C "$REPO_DIR" reset --hard origin/main || git clone --depth=1 https://github.com/yiancode/cc-reset.git "$REPO_DIR") && \
+"$REPO_DIR/scripts/bootstrap-login.sh" -- --force
 ```
 
 ### 1) 拉取仓库
@@ -144,9 +153,12 @@ export NVM_DIR="$HOME/.nvm"
 ```bash
 ./bin/cc-reset install
 ./bin/cc-reset install --dry-run
+./bin/cc-reset install --no-clipboard
 ```
 
 - `--dry-run`：只打印计划动作，不真正执行
+- 默认会尝试安装 `xclip`，用于 Linux 终端复制登录链接
+- 如不需要，可加 `--no-clipboard`
 
 ### `doctor`
 
@@ -171,6 +183,7 @@ export NVM_DIR="$HOME/.nvm"
 ./bin/cc-reset login --code-state '<code>#<state>'
 ./bin/cc-reset login --email you@example.com
 ./bin/cc-reset login --force
+./bin/cc-reset login --no-clipboard
 ```
 
 说明：
@@ -179,6 +192,7 @@ export NVM_DIR="$HOME/.nvm"
 - `--code-state`：如果你拿到的是 `code#state` 形式，也可以直接完成
 - `--email`：预填登录邮箱
 - 默认会先检查是否已认证；如需强制重新认证，使用 `--force`
+- 默认会尝试安装 `xclip`；如不需要，可用 `--no-clipboard`
 - 已认证时会输出 PASS/WARN/INFO 风格状态卡片
 - `install` / `doctor` / 已认证跳过登录场景都会输出 PASS/WARN/INFO 卡片
 - `install --dry-run` 也会输出预览卡片
@@ -199,6 +213,7 @@ export NVM_DIR="$HOME/.nvm"
 ```bash
 ./scripts/bootstrap-login.sh
 ./scripts/bootstrap-login.sh -- --email you@example.com
+./scripts/bootstrap-login.sh -- --force
 ```
 
 用途：

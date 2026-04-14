@@ -11,6 +11,7 @@ Usage: ./scripts/bootstrap-login.sh [install flags...] [-- login flags...]
 Examples:
   ./scripts/bootstrap-login.sh
   ./scripts/bootstrap-login.sh -- --email you@example.com
+  ./scripts/bootstrap-login.sh -- --force
   ./scripts/bootstrap-login.sh --dry-run
 EOF
 }

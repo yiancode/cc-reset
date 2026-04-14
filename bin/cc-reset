@@ -33,12 +33,14 @@ EOF
 
 ccr::cmd_install() {
   local dry_run=0
+  local with_clipboard=1
   while (($#)); do
     case "$1" in
       --dry-run) dry_run=1 ;;
+      --no-clipboard) with_clipboard=0 ;;
       -h|--help)
         cat <<'EOF'
-Usage: cc-reset install [--dry-run]
+Usage: cc-reset install [--dry-run] [--no-clipboard]
 
 Install required yum packages, nvm, Node LTS, npm, and the latest Claude Code.
 EOF
@@ -52,6 +54,9 @@ EOF
   ccr::require_linux_or_dry_run "$dry_run"
   ccr::ensure_state_dirs
   ccr::install_system_packages "$dry_run"
+  if [[ "$with_clipboard" -eq 1 ]]; then
+    ccr::ensure_linux_clipboard_tool "$dry_run" || true
+  fi
   ccr::install_nvm "$dry_run"
   ccr::install_node_lts "$dry_run"
   ccr::install_claude_code "$dry_run"
@@ -100,6 +105,7 @@ ccr::cmd_login() {
   local code_state=""
   local email=""
   local force=0
+  local install_clipboard=1
   local -a start_cmd
 
   while (($#)); do
@@ -125,9 +131,12 @@ ccr::cmd_login() {
       --force)
         force=1
         ;;
+      --no-clipboard)
+        install_clipboard=0
+        ;;
       -h|--help)
         cat <<'EOF'
-Usage: cc-reset login [--print-url] [--callback-url <url>] [--code-state <code#state>] [--email <email>] [--force]
+Usage: cc-reset login [--print-url] [--callback-url <url>] [--code-state <code#state>] [--email <email>] [--force] [--no-clipboard]
 
 Start the manual Claude subscription OAuth flow. By default:
   1. Generates the login URL
@@ -145,6 +154,9 @@ EOF
   done
 
   ccr::require_node
+  if [[ "$install_clipboard" -eq 1 ]]; then
+    ccr::ensure_linux_clipboard_tool 0 || true
+  fi
 
   if [[ "$force" -ne 1 ]] && ccr::is_authenticated; then
     printf '=============================================\n'

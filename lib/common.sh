@@ -137,6 +137,22 @@ ccr::install_system_packages() {
   ccr::run "$dry_run" sudo "$pkg_manager" install -y git curl wget gcc-c++ make tar
 }
 
+ccr::ensure_linux_clipboard_tool() {
+  local dry_run="${1:-0}"
+  local pkg_manager
+
+  ccr::has_cmd xclip && return 0
+  ccr::has_cmd xsel && return 0
+  [[ "${OSTYPE:-}" == linux* ]] || return 1
+
+  pkg_manager="$(ccr::detect_pkg_manager 2>/dev/null || true)"
+  [[ -n "$pkg_manager" ]] || return 1
+
+  ccr::status_line "[INFO]" "Clipboard tool" "Installing xclip for link copy support"
+  ccr::run "$dry_run" sudo "$pkg_manager" install -y xclip || return 1
+  ccr::has_cmd xclip
+}
+
 ccr::install_nvm() {
   local dry_run="$1"
   ccr::ensure_shell_init
