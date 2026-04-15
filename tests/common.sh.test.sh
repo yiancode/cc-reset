@@ -114,4 +114,90 @@ rm -f "$FAKE_BIN/claude"
 
 unset -f sudo
 
+# CCR_NODE_MAJOR / CCR_NODE_FALLBACK_MAJOR must honour env overrides.
+# Re-source common.sh in a subshell with the env vars set, then read back.
+out="$(CCR_NODE_MAJOR=18 CCR_NODE_FALLBACK_MAJOR=16 bash -c "
+  source '$ROOT_DIR/lib/common.sh'
+  printf '%s %s %s\n' \"\$CCR_NODE_MAJOR\" \"\$CCR_NODE_FALLBACK_MAJOR\" \"\$CCR_SYSTEM_NODE\"
+")"
+[[ "$out" == "18 16 /usr/bin/node-18" ]] \
+  || { echo "env override failed: got '$out'"; exit 1; }
+
+# An empty fallback must be honoured (disable fallback path).
+out="$(CCR_NODE_MAJOR=20 CCR_NODE_FALLBACK_MAJOR= bash -c "
+  source '$ROOT_DIR/lib/common.sh'
+  printf '%s|%s\n' \"\$CCR_NODE_MAJOR\" \"\$CCR_NODE_FALLBACK_MAJOR\"
+")"
+[[ "$out" == "20|" ]] \
+  || { echo "empty fallback override failed: got '$out'"; exit 1; }
+
+# _refresh_system_paths must follow a CCR_NODE_MAJOR mutation.
+(
+  source "$ROOT_DIR/lib/common.sh"
+  CCR_NODE_MAJOR=18
+  ccr::_refresh_system_paths
+  [[ "$CCR_SYSTEM_NODE" == "/usr/bin/node-18" ]] || { echo "refresh did not update NODE path"; exit 1; }
+  [[ "$CCR_SYSTEM_NPM"  == "/usr/bin/npm-18"  ]] || { echo "refresh did not update NPM path";  exit 1; }
+)
+
+# install_node_and_claude_with_fallback: mock install_system_node +
+# install_claude_code + smoke_test so we can exercise the retry logic
+# without actually touching the system. Fail the first major, pass the
+# second → the caller should see rc=0 AND CCR_NODE_MAJOR should end up
+# as the fallback.
+(
+  source "$ROOT_DIR/lib/common.sh"
+  CCR_NODE_MAJOR=20
+  CCR_NODE_FALLBACK_MAJOR=18
+  ccr::install_system_node() { :; }
+  ccr::install_claude_code()  { :; }
+  ccr::smoke_test_claude()    { [[ "$CCR_NODE_MAJOR" == "18" ]]; }
+  ccr::install_node_and_claude_with_fallback 0 >/dev/null 2>&1 \
+    || { echo "fallback flow did not return 0"; exit 1; }
+  [[ "$CCR_NODE_MAJOR" == "18" ]] \
+    || { echo "expected CCR_NODE_MAJOR=18 after fallback, got $CCR_NODE_MAJOR"; exit 1; }
+)
+
+# Same setup but BOTH majors fail → function must return non-zero.
+(
+  source "$ROOT_DIR/lib/common.sh"
+  CCR_NODE_MAJOR=20
+  CCR_NODE_FALLBACK_MAJOR=18
+  ccr::install_system_node() { :; }
+  ccr::install_claude_code()  { :; }
+  ccr::smoke_test_claude()    { return 1; }
+  if ccr::install_node_and_claude_with_fallback 0 >/dev/null 2>&1; then
+    echo "expected total failure when both majors fail"
+    exit 1
+  fi
+)
+
+# Requested major passes on first try → fallback must not be attempted.
+(
+  source "$ROOT_DIR/lib/common.sh"
+  CCR_NODE_MAJOR=20
+  CCR_NODE_FALLBACK_MAJOR=18
+  _calls=0
+  ccr::install_system_node() { _calls=$((_calls + 1)); }
+  ccr::install_claude_code()  { :; }
+  ccr::smoke_test_claude()    { return 0; }
+  ccr::install_node_and_claude_with_fallback 0 >/dev/null 2>&1
+  [[ "$_calls" -eq 1 ]] \
+    || { echo "expected 1 install attempt, got $_calls"; exit 1; }
+  [[ "$CCR_NODE_MAJOR" == "20" ]] \
+    || { echo "CCR_NODE_MAJOR should stay at 20, got $CCR_NODE_MAJOR"; exit 1; }
+)
+
+# Dry-run short-circuits smoke testing.
+(
+  source "$ROOT_DIR/lib/common.sh"
+  CCR_NODE_MAJOR=20
+  CCR_NODE_FALLBACK_MAJOR=18
+  ccr::install_system_node() { :; }
+  ccr::install_claude_code()  { :; }
+  ccr::smoke_test_claude()    { echo "smoke ran — should not happen in dry-run" >&2; return 1; }
+  ccr::install_node_and_claude_with_fallback 1 >/dev/null 2>&1 \
+    || { echo "dry-run fallback-wrapper should always return 0"; exit 1; }
+)
+
 echo "common.sh tests passed"

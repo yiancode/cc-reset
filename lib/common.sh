@@ -16,11 +16,30 @@ CCR_CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
 # Package name is "nodejs${CCR_NODE_MAJOR}" and the rpm ships binaries as
 # /usr/bin/{node,npm,npx}-${CCR_NODE_MAJOR}; we symlink those to
 # /usr/local/bin/{node,npm,npx} so every user on the system can find them.
-CCR_NODE_MAJOR="20"
+#
+# Both the requested major and the fallback are env-overridable. The
+# fallback is used when the requested major fails the post-install smoke
+# test (e.g. Claude Code TUI crashes under node 20 on some OpenCloudOS
+# kernels but works under node 18). Set CCR_NODE_FALLBACK_MAJOR="" to
+# disable the fallback and fail hard instead.
+CCR_NODE_MAJOR="${CCR_NODE_MAJOR:-20}"
+CCR_NODE_FALLBACK_MAJOR="${CCR_NODE_FALLBACK_MAJOR-18}"
+# Updated at runtime if we fall back; helpers below read these whenever
+# they need a concrete path.
 CCR_SYSTEM_NODE="/usr/bin/node-${CCR_NODE_MAJOR}"
 CCR_SYSTEM_NPM="/usr/bin/npm-${CCR_NODE_MAJOR}"
 # shellcheck disable=SC2034
 CCR_SYSTEM_NPX="/usr/bin/npx-${CCR_NODE_MAJOR}"
+
+# Recompute the *_SYSTEM_* paths after CCR_NODE_MAJOR is mutated (e.g.
+# during fallback). Everything downstream of install_system_node reads
+# those globals, so they must be kept in sync.
+ccr::_refresh_system_paths() {
+  CCR_SYSTEM_NODE="/usr/bin/node-${CCR_NODE_MAJOR}"
+  CCR_SYSTEM_NPM="/usr/bin/npm-${CCR_NODE_MAJOR}"
+  # shellcheck disable=SC2034
+  CCR_SYSTEM_NPX="/usr/bin/npx-${CCR_NODE_MAJOR}"
+}
 
 ccr::info() { printf '[INFO] %s\n' "$*"; }
 ccr::warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -263,24 +282,132 @@ ccr::install_system_node() {
   local node_pkg="nodejs${CCR_NODE_MAJOR}"
   local npm_pkg="nodejs${CCR_NODE_MAJOR}-npm"
   ccr::info "Installing ${node_pkg} + ${npm_pkg} via ${pkg_manager}"
-  ccr::run "$dry_run" sudo "$pkg_manager" install -y "$node_pkg" "$npm_pkg"
+  # dnf exits non-zero if the package doesn't exist, so we propagate that
+  # up through the fallback caller and it moves on to the next major.
+  ccr::run "$dry_run" sudo "$pkg_manager" install -y "$node_pkg" "$npm_pkg" \
+    || return 1
+
+  # In dry-run we stop here — no binaries will actually exist to symlink.
+  if [[ "$dry_run" -eq 1 ]]; then
+    local bin
+    for bin in node npm npx; do
+      ccr::run 1 sudo ln -sfn "/usr/bin/${bin}-${CCR_NODE_MAJOR}" "/usr/local/bin/${bin}"
+    done
+    return 0
+  fi
 
   # Symlink versioned binaries to /usr/local/bin so bare `node`, `npm`, `npx`
   # resolve for any shell that has /usr/local/bin in PATH (default on RHEL).
+  # If the package manager succeeded but the /usr/bin/${bin}-${major}
+  # binaries are missing (some distros name their nodeN packages
+  # differently — e.g. the vanilla `nodejs` rpm on OpenCloudOS drops
+  # /usr/bin/node rather than /usr/bin/node-18), treat it as a failed
+  # install and let the fallback caller try the next major.
   local bin src dst
   for bin in node npm npx; do
     src="/usr/bin/${bin}-${CCR_NODE_MAJOR}"
     dst="/usr/local/bin/${bin}"
-    if [[ "$dry_run" -eq 1 ]]; then
-      ccr::run 1 sudo ln -sfn "$src" "$dst"
+    if [[ ! -x "$src" ]]; then
+      ccr::warn "${src} not found after installing ${node_pkg}; this distro may name the package differently."
+      return 1
+    fi
+    sudo ln -sfn "$src" "$dst"
+  done
+}
+
+# Smoke-test a freshly installed claude under a real PTY. Returns 0 on
+# clean startup + exit, non-zero if claude segfaults / crashes / hangs.
+#
+# Background: on some OpenCloudOS kernels, `claude` crashes on TUI
+# startup under node 20 (native addon / glibc mismatch) but works fine
+# under node 18. `claude --version` does not load the TUI and so
+# wrongly reports healthy. We need a check that actually exercises
+# the TUI startup path.
+#
+# Strategy: use `script -qc` to allocate a PTY, feed "/exit\n" on stdin
+# to escape the TUI as soon as it's ready, bound the whole thing with
+# `timeout`. If `claude` crashes before it reads stdin, `script` sees
+# the PTY close with a non-zero status and propagates it.
+#
+# Callers should only invoke this after `claude --version` already
+# passed — if even --version fails there's no point doing the PTY dance.
+ccr::smoke_test_claude() {
+  if ! ccr::has_cmd claude; then
+    return 2
+  fi
+  if ! claude --version >/dev/null 2>&1; then
+    return 3
+  fi
+  if ! ccr::has_cmd script || ! ccr::has_cmd timeout; then
+    # No PTY harness available; best we can do is trust --version.
+    # Document the limitation via stderr so it's visible in install logs.
+    ccr::warn "smoke test skipped (script/timeout missing); relying on 'claude --version' only"
+    return 0
+  fi
+  local out rc
+  # `script -qc "<cmd>" /dev/null` runs <cmd> under a PTY and writes no
+  # typescript. We feed /exit over stdin; script relays it into the PTY.
+  # 20s is plenty for a cold TUI startup even on slow VMs.
+  out="$(printf '/exit\n' | timeout 20 script -qc 'claude' /dev/null 2>&1)" || rc=$?
+  rc="${rc:-0}"
+  if [[ "$rc" -eq 0 ]]; then
+    return 0
+  fi
+  # 139 = 128 + SIGSEGV, 134 = 128 + SIGABRT, 124 = timeout. Log the tail
+  # so a human reader can tell which.
+  ccr::warn "claude smoke test failed (exit=$rc)"
+  printf '%s\n' "$out" | tail -n 5 >&2
+  return 1
+}
+
+# Install node + claude for a given major, then smoke-test. If the
+# smoke test passes, leave things in place and return 0. If it fails
+# and a fallback major is configured, retry with the fallback. On
+# ultimate failure, return non-zero so the caller can die.
+ccr::install_node_and_claude_with_fallback() {
+  local dry_run="$1"
+  local -a tried=()
+  local major
+  for major in "$CCR_NODE_MAJOR" "${CCR_NODE_FALLBACK_MAJOR:-}"; do
+    [[ -n "$major" ]] || continue
+    # Skip the fallback if it's identical to the requested major.
+    local already=0 t
+    for t in "${tried[@]}"; do
+      [[ "$t" == "$major" ]] && already=1
+    done
+    [[ "$already" -eq 1 ]] && continue
+    tried+=("$major")
+
+    CCR_NODE_MAJOR="$major"
+    ccr::_refresh_system_paths
+    ccr::info "Attempting Node ${major} + Claude Code"
+    if ! ccr::install_system_node "$dry_run"; then
+      ccr::warn "Node ${major} install failed (package missing or /usr/bin/node-${major} absent)"
       continue
     fi
-    if [[ -x "$src" ]]; then
-      sudo ln -sfn "$src" "$dst"
-    else
-      ccr::warn "${src} not found after install; /usr/local/bin/${bin} was not created."
+    if ! ccr::install_claude_code "$dry_run"; then
+      ccr::warn "Claude Code install under Node ${major} failed"
+      continue
+    fi
+
+    if [[ "$dry_run" -eq 1 ]]; then
+      # No real installation happened — nothing to smoke-test. Accept
+      # the first (requested) major and stop.
+      return 0
+    fi
+
+    hash -r 2>/dev/null || true
+    if ccr::smoke_test_claude; then
+      ccr::ok "Node ${major} + Claude Code smoke test passed"
+      return 0
+    fi
+    ccr::warn "Node ${major} failed smoke test"
+    if [[ -n "${CCR_NODE_FALLBACK_MAJOR:-}" && "$major" != "${CCR_NODE_FALLBACK_MAJOR}" ]]; then
+      ccr::warn "Falling back to Node ${CCR_NODE_FALLBACK_MAJOR}"
     fi
   done
+  ccr::error "All attempted Node majors failed: ${tried[*]}"
+  return 1
 }
 
 ccr::latest_claude_version() {

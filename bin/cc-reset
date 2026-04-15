@@ -46,9 +46,14 @@ Usage: cc-reset install [--dry-run] [--no-clipboard]
 
 Installs:
   - required yum/dnf system packages (git, curl, wget, gcc-c++, make, tar)
-  - Node 20 from distro package (nodejs20 + nodejs20-npm),
-    symlinked to /usr/local/bin/{node,npm,npx}
+  - Node (default major 20, override with CCR_NODE_MAJOR=18) from distro
+    package (nodejs<M> + nodejs<M>-npm), symlinked to /usr/local/bin/{node,npm,npx}
   - latest @anthropic-ai/claude-code via sudo npm install -g
+  - After install, runs a PTY smoke test: if claude can't actually start
+    the TUI under the requested major (a known issue on some OpenCloudOS
+    kernels with node 20), automatically falls back to
+    CCR_NODE_FALLBACK_MAJOR (default 18) and retries. Set
+    CCR_NODE_FALLBACK_MAJOR="" to disable the fallback.
 
 Side-effects:
   - Strips any legacy nvm shell-init block left over by v0.1/v0.2
@@ -77,8 +82,10 @@ EOF
   # Remove dangling /usr/local/bin/{node,npm,npx,claude} stubs that point into
   # an old ~/.nvm tree — otherwise they shadow the system install below.
   ccr::purge_legacy_nvm_binstubs "$dry_run"
-  ccr::install_system_node "$dry_run"
-  ccr::install_claude_code "$dry_run"
+  # Install node + claude, smoke-test, fall back to CCR_NODE_FALLBACK_MAJOR
+  # if the requested major can't actually run the TUI on this host.
+  ccr::install_node_and_claude_with_fallback "$dry_run" \
+    || ccr::die "Claude Code could not be installed on any attempted Node major. Set CCR_NODE_MAJOR / CCR_NODE_FALLBACK_MAJOR to override."
   # Shell command hash may still cache the old paths within the invoking
   # shell; tell the user so the next `claude` resolves to the new binary.
   if [[ "$dry_run" -ne 1 ]]; then
