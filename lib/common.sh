@@ -96,6 +96,8 @@ ccr::detect_pkg_manager() {
     printf 'dnf\n'
   elif ccr::has_cmd yum; then
     printf 'yum\n'
+  elif ccr::has_cmd apt-get; then
+    printf 'apt\n'
   else
     return 1
   fi
@@ -208,14 +210,19 @@ ccr::install_system_packages() {
   if [[ -z "$pkg_manager" ]]; then
     if [[ "$dry_run" -eq 1 ]]; then
       pkg_manager="yum"
-      ccr::warn "No yum/dnf detected on this host; dry-run will use yum-compatible commands for preview."
+      ccr::warn "No yum/dnf/apt detected on this host; dry-run will use yum-compatible commands for preview."
     else
-      ccr::die "Neither yum nor dnf is available."
+      ccr::die "No supported package manager found (yum, dnf, or apt-get)."
     fi
   fi
   ccr::info "Using package manager: ${pkg_manager}"
-  ccr::run "$dry_run" sudo "$pkg_manager" update -y
-  ccr::run "$dry_run" sudo "$pkg_manager" install -y git curl wget gcc-c++ make tar
+  if [[ "$pkg_manager" == "apt" ]]; then
+    ccr::run "$dry_run" sudo apt-get update
+    ccr::run "$dry_run" sudo apt-get install -y git curl wget g++ make tar
+  else
+    ccr::run "$dry_run" sudo "$pkg_manager" update -y
+    ccr::run "$dry_run" sudo "$pkg_manager" install -y git curl wget gcc-c++ make tar
+  fi
 }
 
 ccr::ensure_linux_clipboard_tool() {
@@ -230,7 +237,11 @@ ccr::ensure_linux_clipboard_tool() {
   [[ -n "$pkg_manager" ]] || return 1
 
   ccr::status_line "[INFO]" "Clipboard tool" "Installing xclip for link copy support"
-  ccr::run "$dry_run" sudo "$pkg_manager" install -y xclip || return 1
+  if [[ "$pkg_manager" == "apt" ]]; then
+    ccr::run "$dry_run" sudo apt-get install -y xclip || return 1
+  else
+    ccr::run "$dry_run" sudo "$pkg_manager" install -y xclip || return 1
+  fi
   ccr::has_cmd xclip
 }
 
@@ -263,6 +274,43 @@ ccr::purge_legacy_nvm_binstubs() {
   fi
 }
 
+# Install Node ${CCR_NODE_MAJOR} via NodeSource on Debian/Ubuntu systems.
+# Sets CCR_SYSTEM_NODE / CCR_SYSTEM_NPM / CCR_SYSTEM_NPX to the resulting paths.
+ccr::install_system_node_apt() {
+  local dry_run="$1"
+
+  ccr::info "Installing Node ${CCR_NODE_MAJOR} via NodeSource (Debian/Ubuntu)"
+  if [[ "$dry_run" -eq 1 ]]; then
+    ccr::run 1 bash -c "curl -fsSL https://deb.nodesource.com/setup_${CCR_NODE_MAJOR}.x | sudo -E bash -"
+    ccr::run 1 sudo apt-get install -y nodejs
+    ccr::run 1 sudo ln -sfn /usr/bin/node "/usr/local/bin/node"
+    ccr::run 1 sudo ln -sfn /usr/bin/npm  "/usr/local/bin/npm"
+    ccr::run 1 sudo ln -sfn /usr/bin/npx  "/usr/local/bin/npx"
+    return 0
+  fi
+
+  curl -fsSL "https://deb.nodesource.com/setup_${CCR_NODE_MAJOR}.x" | sudo -E bash -
+  sudo apt-get install -y nodejs
+
+  local node_bin="/usr/bin/node"
+  local npm_bin="/usr/bin/npm"
+  local npx_bin="/usr/bin/npx"
+
+  if [[ ! -x "$node_bin" ]]; then
+    ccr::warn "NodeSource install for Node ${CCR_NODE_MAJOR} failed: ${node_bin} not found"
+    return 1
+  fi
+
+  sudo ln -sfn "$node_bin" "/usr/local/bin/node"
+  [[ -x "$npm_bin" ]] && sudo ln -sfn "$npm_bin" "/usr/local/bin/npm"
+  [[ -x "$npx_bin" ]] && sudo ln -sfn "$npx_bin" "/usr/local/bin/npx"
+
+  CCR_SYSTEM_NODE="$node_bin"
+  CCR_SYSTEM_NPM="$npm_bin"
+  # shellcheck disable=SC2034
+  CCR_SYSTEM_NPX="$npx_bin"
+}
+
 # Install Node ${CCR_NODE_MAJOR} from distro packages and expose node/npm/npx
 # under /usr/local/bin. This replaces the v0.1/v0.2 nvm-based flow: Node now
 # lives in /usr, so every user on the host — not just the one who ran
@@ -275,8 +323,14 @@ ccr::install_system_node() {
     if [[ "$dry_run" -eq 1 ]]; then
       pkg_manager="yum"
     else
-      ccr::die "Neither yum nor dnf is available."
+      ccr::die "No supported package manager found (yum, dnf, or apt-get)."
     fi
+  fi
+
+  # Debian/Ubuntu: delegate to the NodeSource-based installer.
+  if [[ "$pkg_manager" == "apt" ]]; then
+    ccr::install_system_node_apt "$dry_run"
+    return $?
   fi
 
   # Per-major candidate list. Each line is:
