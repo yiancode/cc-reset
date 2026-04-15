@@ -215,6 +215,35 @@ ccr::ensure_linux_clipboard_tool() {
   ccr::has_cmd xclip
 }
 
+# Remove /usr/local/bin/{node,npm,npx,claude} entries that are symlinks
+# pointing into a legacy nvm tree (~/.nvm/). v0.1/v0.2 installed node + claude
+# under ~/.nvm and left these symlinks behind; on RHEL /usr/local/bin precedes
+# /usr/bin in PATH, so a dangling nvm stub shadows the system install and
+# every user on the host ends up running a broken `claude`. install_system_node
+# already re-creates node/npm/npx via `ln -sfn`, but `claude` is not in that
+# loop — it has to be cleared here so install_claude_code's fresh /usr/bin/claude
+# wins the PATH lookup.
+ccr::purge_legacy_nvm_binstubs() {
+  local dry_run="$1"
+  local bin path target
+  local prefix="${CCR_LOCAL_BIN:-/usr/local/bin}"
+  for bin in node npm npx claude; do
+    path="${prefix}/${bin}"
+    [[ -L "$path" ]] || continue
+    target="$(readlink "$path")"
+    [[ "$target" == *"/.nvm/"* ]] || continue
+    if [[ "$dry_run" -eq 1 ]]; then
+      ccr::run 1 sudo rm -f "$path"
+    else
+      ccr::info "Removing legacy nvm stub: ${path} -> ${target}"
+      sudo rm -f "$path"
+    fi
+  done
+  if [[ -d "${HOME}/.nvm" ]]; then
+    ccr::warn "Legacy ${HOME}/.nvm directory still present; cc-reset no longer uses it. Safe to remove: rm -rf ${HOME}/.nvm"
+  fi
+}
+
 # Install Node ${CCR_NODE_MAJOR} from distro packages and expose node/npm/npx
 # under /usr/local/bin. This replaces the v0.1/v0.2 nvm-based flow: Node now
 # lives in /usr, so every user on the host — not just the one who ran

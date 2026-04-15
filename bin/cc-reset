@@ -52,7 +52,10 @@ Installs:
 
 Side-effects:
   - Strips any legacy nvm shell-init block left over by v0.1/v0.2
-    (~/.nvm itself is NOT removed)
+  - Removes /usr/local/bin/{node,npm,npx,claude} symlinks that point into
+    a legacy ~/.nvm tree (those stubs shadow the system install and break
+    claude for every user on the host)
+  - ~/.nvm itself is NOT auto-removed; cc-reset warns if it is still present
   - Makes claude usable by every user on the host, not just the invoking one
 EOF
         return 0
@@ -70,8 +73,16 @@ EOF
   fi
   # Strip any legacy ~/.bashrc nvm block left by v0.1/v0.2 upgrades.
   ccr::ensure_shell_init
+  # Remove dangling /usr/local/bin/{node,npm,npx,claude} stubs that point into
+  # an old ~/.nvm tree — otherwise they shadow the system install below.
+  ccr::purge_legacy_nvm_binstubs "$dry_run"
   ccr::install_system_node "$dry_run"
   ccr::install_claude_code "$dry_run"
+  # Shell command hash may still cache the old paths within the invoking
+  # shell; tell the user so the next `claude` resolves to the new binary.
+  if [[ "$dry_run" -ne 1 ]]; then
+    ccr::info "If 'claude' in your current shell still errors, run: hash -r"
+  fi
 
   local git_version=""
   local node_version=""

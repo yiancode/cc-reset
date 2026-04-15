@@ -77,4 +77,26 @@ grep -q '^beta=2$'  "$TMP_HOME/.bashrc.test-remove"
 
 ccr::is_authenticated
 
+# purge_legacy_nvm_binstubs: symlinks into ~/.nvm must be removed;
+# symlinks pointing elsewhere must be left alone; real files untouched.
+FAKE_BIN="$TMP_HOME/usr-local-bin"
+mkdir -p "$FAKE_BIN"
+mkdir -p "$TMP_HOME/.nvm/versions/node/v24/bin"
+: > "$TMP_HOME/.nvm/versions/node/v24/bin/node"
+: > "$TMP_HOME/.nvm/versions/node/v24/bin/claude"
+ln -sfn "$TMP_HOME/.nvm/versions/node/v24/bin/node"   "$FAKE_BIN/node"
+ln -sfn "$TMP_HOME/.nvm/versions/node/v24/bin/claude" "$FAKE_BIN/claude"
+ln -sfn "/usr/bin/npm-20"                             "$FAKE_BIN/npm"   # unrelated, must stay
+: > "$FAKE_BIN/npx"                                                     # real file, must stay
+
+sudo() { "$@"; }  # strip sudo for the test
+export -f sudo
+CCR_LOCAL_BIN="$FAKE_BIN" ccr::purge_legacy_nvm_binstubs 0 >/dev/null
+
+[[ ! -e "$FAKE_BIN/node"   ]] || { echo "nvm node stub not removed"; exit 1; }
+[[ ! -e "$FAKE_BIN/claude" ]] || { echo "nvm claude stub not removed"; exit 1; }
+[[ -L "$FAKE_BIN/npm"      ]] || { echo "unrelated npm symlink was removed"; exit 1; }
+[[ -f "$FAKE_BIN/npx" && ! -L "$FAKE_BIN/npx" ]] || { echo "real npx file was removed"; exit 1; }
+unset -f sudo
+
 echo "common.sh tests passed"
