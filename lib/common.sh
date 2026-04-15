@@ -2,13 +2,25 @@
 
 set -euo pipefail
 
-CCR_VERSION="0.1.0"
+# shellcheck disable=SC2034
+CCR_VERSION="0.3.0"
 CCR_CONFIG_DIR="${HOME}/.config/cc-reset"
 CCR_STATE_DIR="${CCR_CONFIG_DIR}/state"
 CCR_ENV_FILE="${CCR_CONFIG_DIR}/env.sh"
+# shellcheck disable=SC2034
 CCR_SESSION_FILE="${CCR_STATE_DIR}/oauth-session.json"
 CCR_NVM_BLOCK_ID="cc-reset-nvm"
 CCR_CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}"
+
+# System Node major version installed from distro packages (dnf/yum).
+# Package name is "nodejs${CCR_NODE_MAJOR}" and the rpm ships binaries as
+# /usr/bin/{node,npm,npx}-${CCR_NODE_MAJOR}; we symlink those to
+# /usr/local/bin/{node,npm,npx} so every user on the system can find them.
+CCR_NODE_MAJOR="20"
+CCR_SYSTEM_NODE="/usr/bin/node-${CCR_NODE_MAJOR}"
+CCR_SYSTEM_NPM="/usr/bin/npm-${CCR_NODE_MAJOR}"
+# shellcheck disable=SC2034
+CCR_SYSTEM_NPX="/usr/bin/npx-${CCR_NODE_MAJOR}"
 
 ccr::info() { printf '[INFO] %s\n' "$*"; }
 ccr::warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -135,24 +147,39 @@ with file_path.open("a") as fh:
 PY
 }
 
-ccr::ensure_shell_init() {
-  local block_content
-  # Keep shell startup limited to nvm initialization.
-  # Authentication material must not be auto-sourced from env.sh because stale
-  # OAuth variables override Claude Code's refreshed native credentials.
-  block_content='export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"'
-  ccr::replace_block "${HOME}/.bashrc" "$CCR_NVM_BLOCK_ID" "$block_content"
-  if [[ -f "${HOME}/.zshrc" ]]; then
-    ccr::replace_block "${HOME}/.zshrc" "$CCR_NVM_BLOCK_ID" "$block_content"
-  fi
+# Strip a named block entirely from a file (markers and content). Idempotent.
+ccr::remove_block() {
+  local file="$1"
+  local block_id="$2"
+  [[ -f "$file" ]] || return 0
+  python3 - "$file" "$block_id" <<'PY'
+import pathlib
+import re
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+block_id = sys.argv[2]
+text = file_path.read_text()
+pattern = re.compile(
+    r'\n?# >>> ' + re.escape(block_id) + r' >>>.*?# <<< ' + re.escape(block_id) + r' <<<\n?',
+    re.DOTALL,
+)
+new_text, n = pattern.subn('\n', text)
+if n:
+    # Collapse accidental double blanks introduced by the removal.
+    new_text = re.sub(r'\n{3,}', '\n\n', new_text)
+    file_path.write_text(new_text)
+PY
 }
 
-ccr::run_nvm_shell() {
-  local script="$1"
-  export NVM_DIR="${HOME}/.nvm"
-  [[ -s "${NVM_DIR}/nvm.sh" ]] || return 1
-  bash -lc "set +u; export NVM_DIR=\"\$HOME/.nvm\"; . \"\$NVM_DIR/nvm.sh\"; ${script}"
+ccr::ensure_shell_init() {
+  # Starting v0.3.0 cc-reset installs Node system-wide via dnf packages, so no
+  # shell startup init is needed at all. This function now only STRIPS any
+  # legacy nvm block that v0.1/v0.2 installs left behind in ~/.bashrc / ~/.zshrc.
+  ccr::remove_block "${HOME}/.bashrc" "$CCR_NVM_BLOCK_ID"
+  if [[ -f "${HOME}/.zshrc" ]]; then
+    ccr::remove_block "${HOME}/.zshrc" "$CCR_NVM_BLOCK_ID"
+  fi
 }
 
 ccr::install_system_packages() {
@@ -188,42 +215,68 @@ ccr::ensure_linux_clipboard_tool() {
   ccr::has_cmd xclip
 }
 
-ccr::install_nvm() {
+# Install Node ${CCR_NODE_MAJOR} from distro packages and expose node/npm/npx
+# under /usr/local/bin. This replaces the v0.1/v0.2 nvm-based flow: Node now
+# lives in /usr, so every user on the host — not just the one who ran
+# cc-reset — can run `claude`.
+ccr::install_system_node() {
   local dry_run="$1"
-  ccr::ensure_shell_init
-  if [[ -s "${HOME}/.nvm/nvm.sh" ]]; then
-    ccr::info "nvm already installed."
-    return 0
+  local pkg_manager
+  pkg_manager="$(ccr::detect_pkg_manager 2>/dev/null || true)"
+  if [[ -z "$pkg_manager" ]]; then
+    if [[ "$dry_run" -eq 1 ]]; then
+      pkg_manager="yum"
+    else
+      ccr::die "Neither yum nor dnf is available."
+    fi
   fi
-  ccr::run "$dry_run" bash -lc 'curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash'
-}
 
-ccr::install_node_lts() {
-  local dry_run="$1"
-  if [[ "$dry_run" -eq 1 ]]; then
-    ccr::run 1 bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; nvm install --lts; nvm alias default lts/*; nvm use --lts'
-    return 0
-  fi
-  ccr::run_nvm_shell 'nvm install --lts >/dev/null; nvm alias default "lts/*" >/dev/null; nvm use --lts >/dev/null' \
-    || ccr::die "nvm is not available after installation."
+  local node_pkg="nodejs${CCR_NODE_MAJOR}"
+  local npm_pkg="nodejs${CCR_NODE_MAJOR}-npm"
+  ccr::info "Installing ${node_pkg} + ${npm_pkg} via ${pkg_manager}"
+  ccr::run "$dry_run" sudo "$pkg_manager" install -y "$node_pkg" "$npm_pkg"
+
+  # Symlink versioned binaries to /usr/local/bin so bare `node`, `npm`, `npx`
+  # resolve for any shell that has /usr/local/bin in PATH (default on RHEL).
+  local bin src dst
+  for bin in node npm npx; do
+    src="/usr/bin/${bin}-${CCR_NODE_MAJOR}"
+    dst="/usr/local/bin/${bin}"
+    if [[ "$dry_run" -eq 1 ]]; then
+      ccr::run 1 sudo ln -sfn "$src" "$dst"
+      continue
+    fi
+    if [[ -x "$src" ]]; then
+      sudo ln -sfn "$src" "$dst"
+    else
+      ccr::warn "${src} not found after install; /usr/local/bin/${bin} was not created."
+    fi
+  done
 }
 
 ccr::latest_claude_version() {
-  npm view @anthropic-ai/claude-code version
+  if [[ -x "$CCR_SYSTEM_NPM" ]]; then
+    "$CCR_SYSTEM_NPM" view @anthropic-ai/claude-code version
+  else
+    npm view @anthropic-ai/claude-code version
+  fi
 }
 
+# Globally install @anthropic-ai/claude-code via the system npm. The binary
+# lands in /usr/bin (rpm-managed npm) or /usr/local/bin (if a user has
+# customised npm prefix). Either path is readable by every user on the host.
 ccr::install_claude_code() {
   local dry_run="$1"
   if [[ "$dry_run" -eq 1 ]]; then
-    ccr::run 1 bash -lc 'export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; nvm use --lts >/dev/null && npm view @anthropic-ai/claude-code version && npm install -g @anthropic-ai/claude-code@"$(npm view @anthropic-ai/claude-code version)"'
+    ccr::run 1 sudo "$CCR_SYSTEM_NPM" install -g @anthropic-ai/claude-code@latest
     return 0
   fi
-
+  [[ -x "$CCR_SYSTEM_NPM" ]] \
+    || ccr::die "System npm not found at ${CCR_SYSTEM_NPM}. Run 'cc-reset install' (or install nodejs${CCR_NODE_MAJOR}) first."
   local latest
   latest="$(ccr::latest_claude_version)"
   ccr::info "Installing Claude Code @ ${latest}"
-  ccr::run_nvm_shell "nvm use --lts >/dev/null; npm install -g @anthropic-ai/claude-code@${latest}" \
-    || ccr::die "nvm must be loaded before installing Claude Code."
+  sudo "$CCR_SYSTEM_NPM" install -g "@anthropic-ai/claude-code@${latest}"
 }
 
 ccr::print_versions() {
@@ -231,7 +284,6 @@ ccr::print_versions() {
     ccr::has_cmd git && printf 'git: %s\n' "$(git --version | awk '{print $3}')" || printf 'git: missing\n'
     ccr::has_cmd curl && printf 'curl: present\n' || printf 'curl: missing\n'
     ccr::has_cmd wget && printf 'wget: present\n' || printf 'wget: missing\n'
-    ccr::run_nvm_shell 'nvm use --lts >/dev/null 2>&1 || true' >/dev/null 2>&1 || true
     ccr::has_cmd node && printf 'node: %s\n' "$(node -v)" || printf 'node: missing\n'
     ccr::has_cmd npm && printf 'npm: %s\n' "$(npm -v)" || printf 'npm: missing\n'
     ccr::has_cmd claude && printf 'claude: %s\n' "$(claude --version)" || printf 'claude: missing\n'
@@ -268,7 +320,7 @@ ccr::doctor() {
   local json="$1"
   local os_name="unknown"
   local pkg_manager="missing"
-  local nvm_status="missing"
+  local node_source="missing"
   local node_version=""
   local npm_version=""
   local claude_version=""
@@ -290,7 +342,11 @@ ccr::doctor() {
   ccr::has_cmd wget && wget_status="present"
   ccr::has_cmd gcc && gcc_status="present"
   ccr::has_cmd make && make_status="present"
-  [[ -s "${HOME}/.nvm/nvm.sh" ]] && nvm_status="present"
+  if [[ -x "$CCR_SYSTEM_NODE" ]]; then
+    node_source="system (nodejs${CCR_NODE_MAJOR})"
+  elif [[ -s "${HOME}/.nvm/nvm.sh" ]]; then
+    node_source="nvm (legacy)"
+  fi
   ccr::has_cmd node && node_version="$(node -v)"
   ccr::has_cmd npm && npm_version="$(npm -v)"
   ccr::has_cmd claude && claude_version="$(claude --version)"
@@ -298,7 +354,7 @@ ccr::doctor() {
 
   if [[ "$json" -eq 1 ]]; then
     cat <<EOF
-{"os":"${os_name}","packageManager":"${pkg_manager}","git":"${git_status}","curl":"${curl_status}","wget":"${wget_status}","gcc":"${gcc_status}","make":"${make_status}","nvm":"${nvm_status}","node":"${node_version}","npm":"${npm_version}","claude":"${claude_version}","auth":"${auth_state}"}
+{"os":"${os_name}","packageManager":"${pkg_manager}","git":"${git_status}","curl":"${curl_status}","wget":"${wget_status}","gcc":"${gcc_status}","make":"${make_status}","nodeSource":"${node_source}","node":"${node_version}","npm":"${npm_version}","claude":"${claude_version}","auth":"${auth_state}"}
 EOF
     return 0
   fi
@@ -310,7 +366,7 @@ EOF
     "$wget_status" \
     "$gcc_status" \
     "$make_status" \
-    "$nvm_status" \
+    "$node_source" \
     "${node_version:-}" \
     "${npm_version:-}" \
     "${claude_version:-}" \
@@ -405,7 +461,7 @@ ccr::render_doctor_card() {
   local wget_status="$5"
   local gcc_status="$6"
   local make_status="$7"
-  local nvm_status="$8"
+  local node_source="$8"
   local node_version="$9"
   local npm_version="${10}"
   local claude_version="${11}"
@@ -432,7 +488,7 @@ ccr::render_doctor_card() {
   ccr::status_line "[PASS]" "wget" "$wget_status"
   ccr::status_line "[PASS]" "gcc" "$gcc_status"
   ccr::status_line "[PASS]" "make" "$make_status"
-  ccr::status_line "$([[ "$nvm_status" == "present" ]] && echo "[PASS]" || echo "[WARN]")" "nvm" "$nvm_status"
+  ccr::status_line "$([[ "$node_source" != "missing" ]] && echo "[PASS]" || echo "[WARN]")" "Node source" "$node_source"
   ccr::status_line "$([[ -n "$node_version" ]] && echo "[PASS]" || echo "[WARN]")" "Node runtime" "${node_version:-missing}"
   ccr::status_line "$([[ -n "$npm_version" ]] && echo "[PASS]" || echo "[WARN]")" "npm" "${npm_version:-missing}"
   ccr::status_line "$([[ -n "$claude_version" ]] && echo "[PASS]" || echo "[WARN]")" "Claude Code" "${claude_version:-missing}"

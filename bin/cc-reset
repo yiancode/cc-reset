@@ -14,7 +14,7 @@ Usage:
   cc-reset <command> [options]
 
 Commands:
-  install       Install system deps, nvm, Node LTS, Claude Code
+  install       Install system deps, Node 20 (dnf), Claude Code (global npm)
   doctor        Check current environment status
   login         Start manual OAuth helper flow and persist Claude credentials
   quickstart    Print the canonical git-only bootstrap one-liner
@@ -44,7 +44,16 @@ ccr::cmd_install() {
         cat <<'EOF'
 Usage: cc-reset install [--dry-run] [--no-clipboard]
 
-Install required yum packages, nvm, Node LTS, npm, and the latest Claude Code.
+Installs:
+  - required yum/dnf system packages (git, curl, wget, gcc-c++, make, tar)
+  - Node 20 from distro package (nodejs20 + nodejs20-npm),
+    symlinked to /usr/local/bin/{node,npm,npx}
+  - latest @anthropic-ai/claude-code via sudo npm install -g
+
+Side-effects:
+  - Strips any legacy nvm shell-init block left over by v0.1/v0.2
+    (~/.nvm itself is NOT removed)
+  - Makes claude usable by every user on the host, not just the invoking one
 EOF
         return 0
         ;;
@@ -59,8 +68,9 @@ EOF
   if [[ "$with_clipboard" -eq 1 ]]; then
     ccr::ensure_linux_clipboard_tool "$dry_run" || true
   fi
-  ccr::install_nvm "$dry_run"
-  ccr::install_node_lts "$dry_run"
+  # Strip any legacy ~/.bashrc nvm block left by v0.1/v0.2 upgrades.
+  ccr::ensure_shell_init
+  ccr::install_system_node "$dry_run"
   ccr::install_claude_code "$dry_run"
 
   local git_version=""

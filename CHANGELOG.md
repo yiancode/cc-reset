@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-04-15
+
+### Changed
+
+- **Install path: dnf Node 20 instead of nvm + Node LTS.**
+  - `install` now runs `sudo dnf install -y nodejs20 nodejs20-npm` and symlinks
+    `/usr/bin/{node,npm,npx}-20` into `/usr/local/bin`, so `node`/`npm`/`claude`
+    are available to every Linux user on the host, not just the invoking one.
+  - `@anthropic-ai/claude-code` is now installed via `sudo npm install -g`,
+    landing in system `/usr/bin/claude` (or wherever the system npm prefix
+    resolves to).
+  - `ccr::install_nvm` / `ccr::install_node_lts` are removed; their
+    responsibility is now held by a single `ccr::install_system_node`.
+  - `ccr::run_nvm_shell` is removed — no subshell is needed to use Node now.
+
+### Fixed
+
+- **Multi-user VPS: non-invoking users could not run `claude`.** Previously
+  Node + claude lived under `~/.nvm/...`, which is unreachable from any
+  non-root user because `/root` is mode 700. With the system-wide install,
+  a freshly created Linux user can run `claude` immediately (paired with a
+  shared-auth tool like `claude-share`, no re-login required).
+
+### Migration
+
+- Upgrading from v0.1 / v0.2 automatically removes the `cc-reset-nvm` shell
+  startup block from `~/.bashrc` / `~/.zshrc`. `~/.nvm/` itself is left in
+  place; if you no longer need it, delete it manually.
+- `doctor` now reports `Node source` as one of `system (nodejs20)`,
+  `nvm (legacy)`, or `missing`.
+- `doctor --json` replaces the `nvm` key with `nodeSource` and now reports
+  the discovered install source.
+
 ## [0.2.0] - 2026-04-15
 
 ### Fixed
