@@ -97,6 +97,21 @@ CCR_LOCAL_BIN="$FAKE_BIN" ccr::purge_legacy_nvm_binstubs 0 >/dev/null
 [[ ! -e "$FAKE_BIN/claude" ]] || { echo "nvm claude stub not removed"; exit 1; }
 [[ -L "$FAKE_BIN/npm"      ]] || { echo "unrelated npm symlink was removed"; exit 1; }
 [[ -f "$FAKE_BIN/npx" && ! -L "$FAKE_BIN/npx" ]] || { echo "real npx file was removed"; exit 1; }
+
+# purge is robust against a broken symlink whose readlink target is outside
+# the nvm tree (must NOT be removed).
+ln -sfn "/nonexistent/elsewhere/node" "$FAKE_BIN/node"
+CCR_LOCAL_BIN="$FAKE_BIN" ccr::purge_legacy_nvm_binstubs 0 >/dev/null
+[[ -L "$FAKE_BIN/node" ]] || { echo "unrelated broken symlink was wrongly removed"; exit 1; }
+rm -f "$FAKE_BIN/node"
+
+# Dry-run: no filesystem changes, but [DRY-RUN] line is printed to stdout.
+ln -sfn "$TMP_HOME/.nvm/versions/node/v24/bin/claude" "$FAKE_BIN/claude"
+out="$(CCR_LOCAL_BIN="$FAKE_BIN" ccr::purge_legacy_nvm_binstubs 1 2>&1)"
+[[ -L "$FAKE_BIN/claude" ]] || { echo "dry-run actually removed the file"; exit 1; }
+grep -q '\[DRY-RUN\] sudo rm -f' <<<"$out" || { echo "dry-run did not print plan; got: $out"; exit 1; }
+rm -f "$FAKE_BIN/claude"
+
 unset -f sudo
 
 echo "common.sh tests passed"

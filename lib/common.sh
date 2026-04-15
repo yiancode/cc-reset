@@ -230,17 +230,17 @@ ccr::purge_legacy_nvm_binstubs() {
   for bin in node npm npx claude; do
     path="${prefix}/${bin}"
     [[ -L "$path" ]] || continue
-    target="$(readlink "$path")"
+    # readlink can fail on some exotic filesystems even for a symlink; treat
+    # that as "not our problem" rather than aborting the whole install.
+    target="$(readlink "$path" 2>/dev/null || true)"
+    [[ -n "$target" ]] || continue
     [[ "$target" == *"/.nvm/"* ]] || continue
-    if [[ "$dry_run" -eq 1 ]]; then
-      ccr::run 1 sudo rm -f "$path"
-    else
-      ccr::info "Removing legacy nvm stub: ${path} -> ${target}"
-      sudo rm -f "$path"
-    fi
+    ccr::info "Removing legacy nvm stub: ${path} -> ${target}"
+    ccr::run "$dry_run" sudo rm -f "$path"
   done
   if [[ -d "${HOME}/.nvm" ]]; then
-    ccr::warn "Legacy ${HOME}/.nvm directory still present; cc-reset no longer uses it. Safe to remove: rm -rf ${HOME}/.nvm"
+    ccr::warn "Legacy ${HOME}/.nvm directory still present under $(id -un)'s home; cc-reset no longer uses it. Safe to remove: rm -rf ${HOME}/.nvm"
+    ccr::warn "(Other users may have their own ~/.nvm — cc-reset only checks the invoking user.)"
   fi
 }
 

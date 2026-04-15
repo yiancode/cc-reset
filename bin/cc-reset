@@ -67,6 +67,7 @@ EOF
 
   ccr::require_linux_or_dry_run "$dry_run"
   ccr::ensure_state_dirs
+  ccr::info "cc-reset install is idempotent; safe to re-run if interrupted."
   ccr::install_system_packages "$dry_run"
   if [[ "$with_clipboard" -eq 1 ]]; then
     ccr::ensure_linux_clipboard_tool "$dry_run" || true
@@ -150,6 +151,9 @@ ccr::cmd_login() {
         shift
         email="${1:-}"
         [[ -n "$email" ]] || ccr::die "--email requires a value"
+        # Minimal sanity check — OAuth uses this as login_hint only, but
+        # catching obvious typos here beats a confusing upstream error.
+        [[ "$email" == *@*.* ]] || ccr::die "--email does not look like an email address: $email"
         ;;
       --force)
         force=1
