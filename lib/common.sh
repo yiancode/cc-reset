@@ -279,84 +279,182 @@ ccr::install_system_node() {
     fi
   fi
 
-  local node_pkg="nodejs${CCR_NODE_MAJOR}"
-  local npm_pkg="nodejs${CCR_NODE_MAJOR}-npm"
-  ccr::info "Installing ${node_pkg} + ${npm_pkg} via ${pkg_manager}"
-  # dnf exits non-zero if the package doesn't exist, so we propagate that
-  # up through the fallback caller and it moves on to the next major.
-  ccr::run "$dry_run" sudo "$pkg_manager" install -y "$node_pkg" "$npm_pkg" \
-    || return 1
+  # Per-major candidate list. Each line is:
+  #   <space-sep-pkgs>|<node-bin>|<npm-bin>|<npx-bin>
+  # We try each line in order until one fully works (dnf install succeeds
+  # AND all three binaries exist). The first line is the "distro-native"
+  # packaging; later lines are fallbacks for distros that name things
+  # differently.
+  local candidates
+  case "$CCR_NODE_MAJOR" in
+    20)
+      candidates=(
+        'nodejs20 nodejs20-npm|/usr/bin/node-20|/usr/bin/npm-20|/usr/bin/npx-20'
+      )
+      ;;
+    18)
+      # OpenCloudOS 9 / RHEL 9 ship Node 18 as the vanilla `nodejs` rpm
+      # with binaries directly at /usr/bin/node. Some downstreams expose
+      # a separately-versioned `nodejs18` parallel install; try both.
+      candidates=(
+        'nodejs|/usr/bin/node|/usr/bin/npm|/usr/bin/npx'
+        'nodejs18 nodejs18-npm|/usr/bin/node-18|/usr/bin/npm-18|/usr/bin/npx-18'
+      )
+      ;;
+    *)
+      candidates=(
+        "nodejs${CCR_NODE_MAJOR} nodejs${CCR_NODE_MAJOR}-npm|/usr/bin/node-${CCR_NODE_MAJOR}|/usr/bin/npm-${CCR_NODE_MAJOR}|/usr/bin/npx-${CCR_NODE_MAJOR}"
+      )
+      ;;
+  esac
 
-  # In dry-run we stop here — no binaries will actually exist to symlink.
-  if [[ "$dry_run" -eq 1 ]]; then
-    local bin
-    for bin in node npm npx; do
-      ccr::run 1 sudo ln -sfn "/usr/bin/${bin}-${CCR_NODE_MAJOR}" "/usr/local/bin/${bin}"
-    done
-    return 0
-  fi
+  local line pkgs node_bin npm_bin npx_bin installed_ok=0
+  for line in "${candidates[@]}"; do
+    pkgs="${line%%|*}"
+    line="${line#*|}"
+    node_bin="${line%%|*}"; line="${line#*|}"
+    npm_bin="${line%%|*}"; line="${line#*|}"
+    npx_bin="${line%%|*}"
 
-  # Symlink versioned binaries to /usr/local/bin so bare `node`, `npm`, `npx`
-  # resolve for any shell that has /usr/local/bin in PATH (default on RHEL).
-  # If the package manager succeeded but the /usr/bin/${bin}-${major}
-  # binaries are missing (some distros name their nodeN packages
-  # differently — e.g. the vanilla `nodejs` rpm on OpenCloudOS drops
-  # /usr/bin/node rather than /usr/bin/node-18), treat it as a failed
-  # install and let the fallback caller try the next major.
-  local bin src dst
-  for bin in node npm npx; do
-    src="/usr/bin/${bin}-${CCR_NODE_MAJOR}"
-    dst="/usr/local/bin/${bin}"
-    if [[ ! -x "$src" ]]; then
-      ccr::warn "${src} not found after installing ${node_pkg}; this distro may name the package differently."
-      return 1
+    ccr::info "Installing ${pkgs} via ${pkg_manager}"
+    # shellcheck disable=SC2086  # $pkgs is intentionally word-split
+    if ! ccr::run "$dry_run" sudo "$pkg_manager" install -y $pkgs; then
+      ccr::warn "${pkgs} install failed, trying next candidate"
+      continue
     fi
-    sudo ln -sfn "$src" "$dst"
+
+    if [[ "$dry_run" -eq 1 ]]; then
+      ccr::run 1 sudo ln -sfn "$node_bin" "/usr/local/bin/node"
+      ccr::run 1 sudo ln -sfn "$npm_bin"  "/usr/local/bin/npm"
+      ccr::run 1 sudo ln -sfn "$npx_bin"  "/usr/local/bin/npx"
+      installed_ok=1
+      break
+    fi
+
+    # Verify the binaries the package was supposed to drop actually
+    # landed where we expected.
+    if [[ ! -x "$node_bin" || ! -x "$npm_bin" || ! -x "$npx_bin" ]]; then
+      ccr::warn "${pkgs} installed but expected binaries missing (${node_bin}); trying next candidate"
+      continue
+    fi
+
+    sudo ln -sfn "$node_bin" "/usr/local/bin/node"
+    sudo ln -sfn "$npm_bin"  "/usr/local/bin/npm"
+    sudo ln -sfn "$npx_bin"  "/usr/local/bin/npx"
+
+    # Persist the resolved paths so install_claude_code uses the right npm.
+    CCR_SYSTEM_NODE="$node_bin"
+    CCR_SYSTEM_NPM="$npm_bin"
+    # shellcheck disable=SC2034
+    CCR_SYSTEM_NPX="$npx_bin"
+    installed_ok=1
+    break
   done
+
+  [[ "$installed_ok" -eq 1 ]] || return 1
 }
 
-# Smoke-test a freshly installed claude under a real PTY. Returns 0 on
-# clean startup + exit, non-zero if claude segfaults / crashes / hangs.
+# Smoke-test a freshly installed claude under a real PTY. Returns 0 if
+# claude starts and actually renders TUI output within the deadline,
+# non-zero on crash, hang, or empty output.
 #
-# Background: on some OpenCloudOS kernels, `claude` crashes on TUI
-# startup under node 20 (native addon / glibc mismatch) but works fine
-# under node 18. `claude --version` does not load the TUI and so
-# wrongly reports healthy. We need a check that actually exercises
-# the TUI startup path.
-#
-# Strategy: use `script -qc` to allocate a PTY, feed "/exit\n" on stdin
-# to escape the TUI as soon as it's ready, bound the whole thing with
-# `timeout`. If `claude` crashes before it reads stdin, `script` sees
-# the PTY close with a non-zero status and propagates it.
+# Why not `claude --version` + `script -qc "claude"`? Both produce false
+# positives on OpenCloudOS + Node 20:
+#   - `--version` exits before loading the TUI native addons
+#   - `script -qc "claude"` under piped stdin lets claude enter a
+#     non-TTY codepath and exit cleanly, skipping the crashing code
+# The real failure mode is a silent hang during TUI init: the process
+# lives but never produces any terminal output. We detect that by
+# driving claude under a genuine pty.fork PTY with an explicit winsize
+# + SSH-like environment, then counting bytes.
 #
 # Callers should only invoke this after `claude --version` already
 # passed — if even --version fails there's no point doing the PTY dance.
+#
+# Return codes:
+#   0 — claude produced TUI bytes within deadline → healthy
+#   1 — claude crashed, hung with zero output, or missing claude
+#   2 — no python3 available, smoke test skipped (advisory only)
 ccr::smoke_test_claude() {
   if ! ccr::has_cmd claude; then
-    return 2
+    return 1
   fi
   if ! claude --version >/dev/null 2>&1; then
-    return 3
+    ccr::warn "claude --version failed; treating as broken install"
+    return 1
   fi
-  if ! ccr::has_cmd script || ! ccr::has_cmd timeout; then
-    # No PTY harness available; best we can do is trust --version.
-    # Document the limitation via stderr so it's visible in install logs.
-    ccr::warn "smoke test skipped (script/timeout missing); relying on 'claude --version' only"
+  if ! ccr::has_cmd python3; then
+    ccr::warn "smoke test skipped (python3 missing); relying on 'claude --version' only"
+    return 2
+  fi
+
+  # Probe script: spawn claude under pty.fork with explicit winsize, wait
+  # up to 10s for any output, report via exit code.
+  #   0 — got bytes (healthy)
+  #   2 — child exited with a signal (crash)
+  #   3 — timeout with 0 bytes (hang — this is the v20 OpenCloudOS case)
+  local probe_out probe_rc
+  probe_out="$(python3 - <<'PY' 2>&1
+import pty, os, select, struct, fcntl, termios, time, sys
+try:
+    pid, fd = pty.fork()
+except Exception as e:
+    print(f"pty.fork failed: {e}", file=sys.stderr); sys.exit(4)
+if pid == 0:
+    os.environ['TERM'] = 'xterm-256color'
+    os.environ.setdefault('LANG', 'en_US.UTF-8')
+    try:
+        os.execvp("claude", ["claude"])
+    except Exception as e:
+        sys.stderr.write(f"execvp failed: {e}\n"); os._exit(127)
+try:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 50, 200, 0, 0))
+except Exception:
+    pass
+deadline = time.time() + 10
+got = 0
+while time.time() < deadline:
+    try:
+        r, _, _ = select.select([fd], [], [], 0.3)
+    except OSError:
+        break
+    if r:
+        try:
+            chunk = os.read(fd, 4096)
+            if chunk:
+                got += len(chunk)
+                if got > 32:  # clearly rendering, done
+                    break
+        except OSError:
+            break
+    wpid, status = os.waitpid(pid, os.WNOHANG)
+    if wpid != 0:
+        sig = status & 0x7f
+        if sig:
+            print(f"crash sig={sig} bytes={got}", file=sys.stderr); sys.exit(2)
+        # clean exit — if we saw bytes, pass; otherwise treat as broken.
+        print(f"exit bytes={got}", file=sys.stderr); sys.exit(0 if got else 3)
+# Still running — kill and judge by bytes.
+try:
+    os.kill(pid, 9); os.waitpid(pid, 0)
+except Exception:
+    pass
+print(f"alive bytes={got}", file=sys.stderr)
+sys.exit(0 if got else 3)
+PY
+)" || probe_rc=$?
+  probe_rc="${probe_rc:-0}"
+
+  if [[ "$probe_rc" -eq 0 ]]; then
     return 0
   fi
-  local out rc
-  # `script -qc "<cmd>" /dev/null` runs <cmd> under a PTY and writes no
-  # typescript. We feed /exit over stdin; script relays it into the PTY.
-  # 20s is plenty for a cold TUI startup even on slow VMs.
-  out="$(printf '/exit\n' | timeout 20 script -qc 'claude' /dev/null 2>&1)" || rc=$?
-  rc="${rc:-0}"
-  if [[ "$rc" -eq 0 ]]; then
-    return 0
-  fi
-  # 139 = 128 + SIGSEGV, 134 = 128 + SIGABRT, 124 = timeout. Log the tail
-  # so a human reader can tell which.
-  ccr::warn "claude smoke test failed (exit=$rc)"
-  printf '%s\n' "$out" | tail -n 5 >&2
+  case "$probe_rc" in
+    2) ccr::warn "claude smoke test: crashed during TUI startup" ;;
+    3) ccr::warn "claude smoke test: TUI produced zero output within 10s (silent hang)" ;;
+    4) ccr::warn "claude smoke test: pty.fork unavailable" ;;
+    *) ccr::warn "claude smoke test: failed with rc=${probe_rc}" ;;
+  esac
+  printf '  probe output: %s\n' "${probe_out}" >&2
   return 1
 }
 
