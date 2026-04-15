@@ -9,6 +9,144 @@
 
 > 当前版本只支持 **yum / dnf**，不支持 `apt`。
 
+---
+
+## 背景说明
+
+Claude Code 在 SSH/VPS 场景下的登录流程与桌面端不同：它无法自动打开浏览器完成 OAuth 回调，用户需要手动复制授权链接、在本地浏览器完成授权、再把回调 URL 粘贴回终端。
+
+`cc-reset` 的目标就是把这个流程自动化：
+
+1. 生成 PKCE OAuth 授权链接
+2. 引导用户完成浏览器授权
+3. 接收回调参数，完成 token 交换
+4. 将凭证写入正确的位置，让 Claude Code 可以直接使用
+
+---
+
+## 问题分析：v0.1.0 的设计缺陷
+
+### 现象
+
+用 `cc-reset login` 登录成功后，`claude` 命令仍然报 **401 Invalid authentication credentials**。即使反复执行 `claude /login` 重新登录，问题依旧复现。
+
+### 根因
+
+v0.1.0 的登录流程如下：
+
+```text
+cc-reset login
+  └─ OAuth 完成
+       └─ 写入 ~/.config/cc-reset/env.sh
+            export CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-...'
+            export CLAUDE_CODE_OAUTH_REFRESH_TOKEN='sk-ant-ort01-...'
+            export CLAUDE_CODE_OAUTH_SCOPES='...'
+```
+
+同时，`cc-reset install` 会在 `~/.bashrc` 中追加：
+
+```bash
+[ -s "$HOME/.config/cc-reset/env.sh" ] && . "$HOME/.config/cc-reset/env.sh"
+```
+
+这导致**每次登录终端，旧 token 都会被自动注入到环境变量**。
+
+问题在于：Claude Code 在读取认证凭证时，**环境变量的优先级高于 `~/.claude/.credentials.json`**。
+
+当 token 过期后：
+
+```text
+用户执行 claude /login
+  └─ 新 token 写入 ~/.claude/.credentials.json  ✓
+
+但下次打开终端：
+  └─ ~/.bashrc 加载 env.sh
+       └─ 旧的过期 token 注入环境变量           ✗
+            └─ 覆盖了 credentials.json 里的新 token
+                 └─ API 请求用旧 token → 401
+```
+
+这个问题有以下几个特点，导致难以排查：
+
+- `claude /stats`、`/login` 等本地命令正常，因为它们读取的是 credentials 文件
+- 只有实际发起 API 请求时才触发 401
+- 每次新开终端都会重新注入旧 token，`unset` 只在当前 session 有效
+- `grep ~/.bashrc` 找不到，因为注入逻辑藏在 `env.sh` 的 sourcing 中
+
+### 为什么不直接删掉 env.sh 就好了？
+
+因为 `env.sh` 每次 `cc-reset login` 都会重新生成，且 `.bashrc` 里的 sourcing 是 `install` 写入的，用户通常不知道它的存在。这是一个会反复触发的系统性问题，而不是一次性的配置错误。
+
+---
+
+## 改造说明（v0.2.0）
+
+### 核心思路
+
+**不用环境变量持久化 token，改用 Claude Code 的原生凭证存储。**
+
+Claude Code 有一套内置的凭证管理机制：
+
+```text
+~/.claude/.credentials.json
+```
+
+格式如下：
+
+```json
+{
+  "claudeAiOauth": {
+    "accessToken": "sk-ant-oat01-...",
+    "refreshToken": "sk-ant-ort01-...",
+    "expiresAt": 1776265049059,
+    "scopes": ["user:inference", "user:profile", "..."],
+    "subscriptionType": "max",
+    "rateLimitTier": "default_claude_max_20x"
+  }
+}
+```
+
+这套机制的优点：
+
+- Claude Code 会**自动用 refresh token 续期**，无需手动重新登录
+- 不依赖环境变量，不会被 `.bashrc` 里的旧值覆盖
+- 与 `claude /login` 原生登录写入同一个文件，完全兼容
+
+### 具体改动
+
+**`lib/oauth-helper.mjs`**
+
+- 新增 `writeCredentialsJson()`，将订阅登录的 OAuth token 写入 `~/.claude/.credentials.json`
+- 写入前会保留现有 `credentials.json` 中的其他字段，只更新 `claudeAiOauth`
+- `writeEnvFile()` 在订阅模式下不再写 `CLAUDE_CODE_OAUTH_TOKEN` / `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` / `CLAUDE_CODE_OAUTH_SCOPES`
+- 订阅模式下 `env.sh` 只保留用户邮箱、UUID 等非敏感身份元数据
+- API key 模式仍写入 `ANTHROPIC_API_KEY`
+
+**`lib/common.sh`**
+
+- `ccr::ensure_shell_init()` 从 shell 启动 block 中移除了 `env.sh` 的 sourcing，只保留 nvm 初始化
+- 旧用户升级时会替换已有的 `cc-reset-nvm` block，不再继续保留旧的 `env.sh` 注入逻辑
+- 新增 `ccr::claude_credentials_present()`，让 `ccr::is_authenticated()` 和 `doctor` 能识别原生凭证文件
+
+### 兼容性
+
+- **Claude 订阅模式**：登录完成后无需 `source` 任何文件，直接运行 `claude`
+- **API key 模式**：仍会写入 `~/.config/cc-reset/env.sh`，但为了避免对订阅模式重新引入旧问题，`install` 不再自动在 shell 启动时 source 这个文件
+- 这意味着 API key 模式在新 shell 中需要手动执行：
+
+```bash
+source ~/.config/cc-reset/env.sh
+```
+
+如果你是从 v0.1.0 升级，`./bin/cc-reset install` 会自动把旧的 shell block 更新为新版本。若你手动写过其他自定义 sourcing 逻辑，再清理一次即可：
+
+```bash
+sed -i '/cc-reset/d' ~/.bashrc
+source ~/.bashrc
+```
+
+---
+
 ## 功能
 
 - 一键安装系统依赖
@@ -21,7 +159,8 @@
   - 尝试复制链接
   - 支持粘贴最终回调 URL
   - 自动完成 token exchange
-  - 生成 `ANTHROPIC_API_KEY` 环境文件
+  - **订阅模式 token 写入 `~/.claude/.credentials.json`**
+  - **API key 模式写入 `~/.config/cc-reset/env.sh`**
   - 已认证时自动跳过重复登录
 - 提供 git 仓库初始化 / remote 配置辅助
 - 提供一键发布脚本
@@ -134,30 +273,21 @@ https://platform.claude.com/oauth/code/callback?code=...&state=...
 4. 把 **完整回调 URL** 粘贴回 VPS 终端
 5. 工具会：
    - 交换 OAuth token
-   - 写入 `~/.config/cc-reset/env.sh`
-   - 同步更新 Claude 全局配置中的 onboarding 状态，避免再次进入首次登录选择界面
+   - 订阅模式写入 `~/.claude/.credentials.json`
+   - API key 模式写入 `~/.config/cc-reset/env.sh`
+   - 同步更新 Claude 全局配置中的 onboarding 状态
 
-如果是 **Claude 订阅登录**（当前默认路径），会写入：
+### 4) 验证登录状态
 
-- `CLAUDE_CODE_OAUTH_TOKEN`
-- `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`
-- `CLAUDE_CODE_OAUTH_SCOPES`
+```bash
+claude auth status --text
+./bin/cc-reset doctor
+```
 
-只有在非订阅 / 非 inference scope 的路径下，才会尝试生成 `ANTHROPIC_API_KEY`。
-
-### 4) 激活环境变量
+如果是 API key 模式，再执行：
 
 ```bash
 source ~/.config/cc-reset/env.sh
-claude auth status --text
-```
-
-`install` 也会把下面这段初始化逻辑追加到 `~/.bashrc`（若存在 `~/.zshrc` 也会同步写入）：
-
-```bash
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-[ -s "$HOME/.config/cc-reset/env.sh" ] && . "$HOME/.config/cc-reset/env.sh"
 ```
 
 ## 命令说明
@@ -187,6 +317,7 @@ export NVM_DIR="$HOME/.nvm"
 - nvm
 - node / npm
 - claude
+- `~/.claude/.credentials.json` 是否存在
 
 ### `login`
 
@@ -207,9 +338,6 @@ export NVM_DIR="$HOME/.nvm"
 - `--email`：预填登录邮箱
 - 默认会先检查是否已认证；如需强制重新认证，使用 `--force`
 - 默认会尝试安装 `xclip`；如不需要，可用 `--no-clipboard`
-- 已认证时会输出 PASS/WARN/INFO 风格状态卡片
-- `install` / `doctor` / 已认证跳过登录场景都会输出 PASS/WARN/INFO 卡片
-- `install --dry-run` 也会输出预览卡片
 
 ### `quickstart`
 
@@ -219,10 +347,6 @@ export NVM_DIR="$HOME/.nvm"
 ./bin/cc-reset quickstart --force
 ```
 
-用途：
-- 直接打印官方推荐的一键命令
-- 不用手动从 README 复制长 one-liner
-
 ### `repo-init`
 
 ```bash
@@ -230,152 +354,64 @@ export NVM_DIR="$HOME/.nvm"
 ./bin/cc-reset repo-init --remote https://github.com/yiancode/cc-reset.git
 ```
 
-功能：
-- 当前目录未初始化 git 时执行 `git init`
-- 配置 `origin`
-
-### `bootstrap-login.sh`
-
-```bash
-./scripts/bootstrap-login.sh
-./scripts/bootstrap-login.sh -- --email you@example.com
-./scripts/bootstrap-login.sh -- --force
-./scripts/print-quickstart.sh
-```
-
-用途：
-- 先跑 `install`
-- 紧接着跑 `login`
-
-适合你已经把仓库 clone 下来之后直接一把跑通。
-
-## 设计说明
-
-### 为什么不用本地监听端口接回调？
-
-因为当前目标是 **VPS + SSH** 场景。
-
-v1 优先保证：
-- 不依赖本地端口
-- 不依赖浏览器自动回调到 VPS
-- 用户只需要复制 URL、登录、再粘贴回调 URL
-
-这比自动监听回调更稳，也更容易排错。
-
-### 为什么登录后是写环境变量，不是直接改 Claude 私有状态？
-
-因为这条路径更透明、更可控：
-- 不依赖 Claude Code 内部私有存储格式
-- 易于审计与备份
-- 更适合开源工具维护
-
-登录完成后，`cc-reset` 会写入：
-
-```bash
-~/.config/cc-reset/env.sh
-```
-
-其中通常包含：
-
-```bash
-export CLAUDE_CODE_OAUTH_TOKEN='...'
-export CLAUDE_CODE_OAUTH_REFRESH_TOKEN='...'
-export CLAUDE_CODE_OAUTH_SCOPES='user:profile user:inference ...'
-```
-
-Claude Code 在当前 shell 中读取该环境变量后即可使用。
-
-## 已知限制
-
-- 只支持 yum / dnf
-- 需要 Linux
-- 当前开发与验证主要面向 OpenCloudOS / RHEL 风格系统
-- OAuth 参数基于当前最新 Claude Code 运行时行为实现；如果上游未来调整 OAuth 参数，可能需要同步更新本项目
-
 ## 故障排查
 
-### 1. `install` 提示不是 Linux
+### 1. 登录后仍然 401
 
-这是正常保护。  
-在 macOS / Windows 上请用：
+检查是否有旧的环境变量残留（v0.1.0 遗留问题）：
+
+```bash
+env | grep CLAUDE_CODE_OAUTH
+```
+
+如果有输出，说明当前 shell 仍加载着旧值。处理方式：
+
+```bash
+unset CLAUDE_CODE_OAUTH_TOKEN
+unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN
+unset CLAUDE_CODE_OAUTH_SCOPES
+exec "$SHELL" -l
+```
+
+然后重新运行：
+
+```bash
+./bin/cc-reset login --force
+```
+
+### 2. `install` 提示不是 Linux
+
+在 macOS / Windows 上请用 `--dry-run` 预览：
 
 ```bash
 ./bin/cc-reset install --dry-run
 ```
 
-### 2. `yum` / `dnf` 不存在
+### 3. `yum` / `dnf` 不存在
 
-当前版本不支持 apt。请在 yum / dnf 系统上使用。
-
-### 3. `login` 完成后 `claude auth status --text` 仍异常
-
-先确认：
-
-```bash
-source ~/.config/cc-reset/env.sh
-echo "$CLAUDE_CODE_OAUTH_TOKEN"
-echo "$CLAUDE_CODE_OAUTH_REFRESH_TOKEN"
-echo "$CLAUDE_CODE_OAUTH_SCOPES"
-```
-
-再执行：
-
-```bash
-claude auth status --text
-```
+当前版本不支持 apt，请在 yum / dnf 系统上使用。
 
 ### 4. 浏览器回调 URL 解析失败
 
-请确认你粘贴的是完整 URL，例如：
+请确认你粘贴的是完整 URL：
 
 ```text
 https://platform.claude.com/oauth/code/callback?code=...&state=...
 ```
 
-或者直接粘贴：
+或者直接粘贴 `<code>#<state>` 形式。
 
-```text
-<code>#<state>
-```
+## 设计说明
 
-## 开源发布建议
+### 为什么 token 写入 credentials.json 而不是环境变量？
 
-如果你要发布到 GitHub，直接执行：
+环境变量持久化 token 有一个根本性的缺陷：**过期的 token 会一直存在于 shell 环境中，并覆盖通过其他方式获取的新 token**。
 
-```bash
-./scripts/publish.sh
-```
+Claude Code 原生的 `~/.claude/.credentials.json` 支持 refresh token 自动续期，token 过期后会静默刷新，无需用户手动干预。写入这个文件与 `claude /login` 原生登录完全兼容，是更正确、更稳定的做法。
 
-或显式指定 remote：
+### 为什么不用本地监听端口接回调？
 
-```bash
-./scripts/publish.sh --remote https://github.com/yiancode/cc-reset.git
-```
-
-脚本会：
-- 初始化 git（如果还没初始化）
-- 设置/更新 `origin`
-- 跑轻量检查
-- 推送当前分支
-
-如果你想手动发布，也可以：
-
-```bash
-./bin/cc-reset repo-init --remote https://github.com/yiancode/cc-reset.git
-git add .
-git commit -m "Bootstrap Claude Code setup and OAuth helper for yum-based VPS
-
-Constraint: v1 is yum-only and SSH-first
-Rejected: Local callback listener | adds operational complexity on VPS
-Confidence: medium
-Scope-risk: moderate
-Directive: Keep OAuth constants aligned with current Claude Code runtime behavior
-Tested: shell syntax checks and CLI smoke verification
-Not-tested: real OAuth exchange on a live subscription account"
-git push -u origin main
-```
-
-如果本机还没有 GitHub 凭证，`git push` 会失败；这种情况下先完成登录/凭证配置后再推送。
+因为目标是 **VPS + SSH** 场景，本地端口在远程服务器上无法被浏览器回调访问。手动粘贴回调 URL 虽然多一步操作，但在 SSH 场景下是最通用、最不依赖额外配置的方案。
 
 ## License
 

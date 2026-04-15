@@ -102,14 +102,49 @@ ccr::append_block_once() {
   } >>"$file"
 }
 
+ccr::replace_block() {
+  local file="$1"
+  local block_id="$2"
+  local content="$3"
+  mkdir -p "$(dirname "$file")"
+  touch "$file"
+  python3 - "$file" "$block_id" "$content" <<'PY'
+import pathlib
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+block_id = sys.argv[2]
+content = sys.argv[3]
+text = file_path.read_text()
+start = f"# >>> {block_id} >>>"
+end = f"# <<< {block_id} <<<"
+replacement = f"{start}\n{content}\n{end}"
+
+if start in text and end in text:
+    before, marker, rest = text.partition(start)
+    middle, end_marker, after = rest.partition(end)
+    if marker and end_marker:
+        updated = f"{before}{replacement}{after}"
+        file_path.write_text(updated)
+        sys.exit(0)
+
+with file_path.open("a") as fh:
+    if text and not text.endswith("\n"):
+        fh.write("\n")
+    fh.write(f"\n{replacement}\n")
+PY
+}
+
 ccr::ensure_shell_init() {
   local block_content
+  # Keep shell startup limited to nvm initialization.
+  # Authentication material must not be auto-sourced from env.sh because stale
+  # OAuth variables override Claude Code's refreshed native credentials.
   block_content='export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-[ -s "$HOME/.config/cc-reset/env.sh" ] && . "$HOME/.config/cc-reset/env.sh"'
-  ccr::append_block_once "${HOME}/.bashrc" "$CCR_NVM_BLOCK_ID" "$block_content"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"'
+  ccr::replace_block "${HOME}/.bashrc" "$CCR_NVM_BLOCK_ID" "$block_content"
   if [[ -f "${HOME}/.zshrc" ]]; then
-    ccr::append_block_once "${HOME}/.zshrc" "$CCR_NVM_BLOCK_ID" "$block_content"
+    ccr::replace_block "${HOME}/.zshrc" "$CCR_NVM_BLOCK_ID" "$block_content"
   fi
 }
 
@@ -288,7 +323,27 @@ ccr::require_node() {
 
 ccr::auth_env_present() {
   [[ -f "$CCR_ENV_FILE" ]] || return 1
-  grep -qE 'CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY' "$CCR_ENV_FILE"
+  grep -q 'ANTHROPIC_API_KEY' "$CCR_ENV_FILE"
+}
+
+ccr::claude_credentials_file() {
+  printf '%s\n' "${CCR_CLAUDE_HOME}/.credentials.json"
+}
+
+ccr::claude_credentials_present() {
+  local credentials_file
+  credentials_file="$(ccr::claude_credentials_file)"
+  [[ -s "$credentials_file" ]]
+}
+
+ccr::oauth_env_present_in_shell() {
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || [[ -n "${CLAUDE_CODE_OAUTH_REFRESH_TOKEN:-}" ]] || [[ -n "${CLAUDE_CODE_OAUTH_SCOPES:-}" ]]
+}
+
+ccr::clear_stale_oauth_env() {
+  unset CLAUDE_CODE_OAUTH_TOKEN
+  unset CLAUDE_CODE_OAUTH_REFRESH_TOKEN
+  unset CLAUDE_CODE_OAUTH_SCOPES
 }
 
 ccr::claude_onboarding_complete() {
@@ -310,6 +365,10 @@ ccr::is_authenticated() {
     return 0
   fi
 
+  if ccr::claude_credentials_present && ccr::claude_onboarding_complete; then
+    return 0
+  fi
+
   if ccr::auth_env_present && ccr::claude_onboarding_complete; then
     return 0
   fi
@@ -319,14 +378,17 @@ ccr::is_authenticated() {
 
 ccr::print_auth_summary() {
   local env_state="missing"
+  local credentials_state="missing"
   local onboarding_state="missing"
   local status_text=""
 
   ccr::auth_env_present && env_state="present"
+  ccr::claude_credentials_present && credentials_state="present"
   ccr::claude_onboarding_complete && onboarding_state="complete"
   status_text="$(ccr::auth_status_text)"
 
   ccr::status_line "$([[ "$env_state" == "present" ]] && echo "[PASS]" || echo "[WARN]")" "Auth env file" "$CCR_ENV_FILE"
+  ccr::status_line "$([[ "$credentials_state" == "present" ]] && echo "[PASS]" || echo "[WARN]")" "Claude credentials" "$(ccr::claude_credentials_file)"
   ccr::status_line "$([[ "$onboarding_state" == "complete" ]] && echo "[PASS]" || echo "[WARN]")" "Onboarding state" "$(ccr::claude_config_file)"
   if [[ -n "$status_text" ]]; then
     ccr::status_line "[PASS]" "Claude auth source" "$(printf '%s' "$status_text" | tr '\n' ' ' | sed 's/  */ /g')"
@@ -349,11 +411,13 @@ ccr::render_doctor_card() {
   local claude_version="${11}"
   local auth_state="${12}"
   local env_state="WARN"
+  local credentials_state="WARN"
   local onboarding_state="WARN"
   local auth_line_state="WARN"
   local status_text=""
 
   ccr::auth_env_present && env_state="PASS"
+  ccr::claude_credentials_present && credentials_state="PASS"
   ccr::claude_onboarding_complete && onboarding_state="PASS"
   status_text="$(ccr::auth_status_text)"
   [[ "$auth_state" == "authenticated" ]] && auth_line_state="PASS"
@@ -374,6 +438,7 @@ ccr::render_doctor_card() {
   ccr::status_line "$([[ -n "$claude_version" ]] && echo "[PASS]" || echo "[WARN]")" "Claude Code" "${claude_version:-missing}"
   ccr::status_line "$([[ "$auth_state" == "authenticated" ]] && echo "[PASS]" || echo "[WARN]")" "Authentication" "$auth_state"
   ccr::status_line "[$env_state]" "Auth env file" "$CCR_ENV_FILE"
+  ccr::status_line "[$credentials_state]" "Claude credentials" "$(ccr::claude_credentials_file)"
   ccr::status_line "[$onboarding_state]" "Onboarding state" "$(ccr::claude_config_file)"
   if [[ -n "$status_text" ]]; then
     ccr::status_line "[$auth_line_state]" "Claude auth source" "$(printf '%s' "$status_text" | tr '\n' ' ' | sed 's/  */ /g')"
